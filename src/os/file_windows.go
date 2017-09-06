@@ -64,7 +64,9 @@ func newConsoleFile(h syscall.Handle, name string) *File {
 	return newFile(h, name, "console")
 }
 
-// NewFile returns a new File with the given file descriptor and name.
+// NewFile returns a new File with the given file descriptor and
+// name. The returned value will be nil if fd is not a valid file
+// descriptor.
 func NewFile(fd uintptr, name string) *File {
 	h := syscall.Handle(fd)
 	if h == syscall.InvalidHandle {
@@ -323,8 +325,7 @@ func Pipe() (r *File, w *File, err error) {
 	return newFile(p[0], "|0", "file"), newFile(p[1], "|1", "file"), nil
 }
 
-// TempDir returns the default directory to use for temporary files.
-func TempDir() string {
+func tempDir() string {
 	n := uint32(syscall.MAX_PATH)
 	for {
 		b := make([]uint16, n)

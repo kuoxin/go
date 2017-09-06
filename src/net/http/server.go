@@ -75,9 +75,10 @@ var (
 // If ServeHTTP panics, the server (the caller of ServeHTTP) assumes
 // that the effect of the panic was isolated to the active request.
 // It recovers the panic, logs a stack trace to the server error log,
-// and hangs up the connection. To abort a handler so the client sees
-// an interrupted response but the server doesn't log an error, panic
-// with the value ErrAbortHandler.
+// and either closes the network connection or sends an HTTP/2
+// RST_STREAM, depending on the HTTP protocol. To abort a handler so
+// the client sees an interrupted response but the server doesn't log
+// an error, panic with the value ErrAbortHandler.
 type Handler interface {
 	ServeHTTP(ResponseWriter, *Request)
 }
@@ -177,6 +178,9 @@ type Hijacker interface {
 	//
 	// The returned bufio.Reader may contain unprocessed buffered
 	// data from the client.
+	//
+	// After a call to Hijack, the original Request.Body should
+	// not be used.
 	Hijack() (net.Conn, *bufio.ReadWriter, error)
 }
 
@@ -725,6 +729,9 @@ func (cr *connReader) Read(p []byte) (n int, err error) {
 	cr.lock()
 	if cr.inRead {
 		cr.unlock()
+		if cr.conn.hijacked() {
+			panic("invalid Body.Read call. After hijacked, the original Request must not be used")
+		}
 		panic("invalid concurrent Body.Read call")
 	}
 	if cr.hitReadLimit() {
@@ -943,7 +950,7 @@ func (c *conn) readRequest(ctx context.Context) (w *response, err error) {
 
 	hosts, haveHost := req.Header["Host"]
 	isH2Upgrade := req.isH2Upgrade()
-	if req.ProtoAtLeast(1, 1) && (!haveHost || len(hosts) == 0) && !isH2Upgrade {
+	if req.ProtoAtLeast(1, 1) && (!haveHost || len(hosts) == 0) && !isH2Upgrade && req.Method != "CONNECT" {
 		return nil, badRequestError("missing required Host header")
 	}
 	if len(hosts) > 1 {
@@ -1333,7 +1340,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	} else if hasCL {
 		delHeader("Transfer-Encoding")
 	} else if w.req.ProtoAtLeast(1, 1) {
-		// HTTP/1.1 or greater: Transfer-Encoding has been set to identity,  and no
+		// HTTP/1.1 or greater: Transfer-Encoding has been set to identity, and no
 		// content-length has been provided. The connection must be closed after the
 		// reply is written, and no chunking is to be done. This is the setup
 		// recommended in the Server-Sent Events candidate recommendation 11,
@@ -1962,8 +1969,9 @@ func StripPrefix(prefix string, h Handler) Handler {
 //
 // The provided code should be in the 3xx range and is usually
 // StatusMovedPermanently, StatusFound or StatusSeeOther.
-func Redirect(w ResponseWriter, r *Request, urlStr string, code int) {
-	if u, err := url.Parse(urlStr); err == nil {
+func Redirect(w ResponseWriter, r *Request, url string, code int) {
+	// parseURL is just url.Parse (url is shadowed for godoc).
+	if u, err := parseURL(url); err == nil {
 		// If url was relative, make absolute by
 		// combining with request path.
 		// The browser would probably do this for us,
@@ -1987,38 +1995,46 @@ func Redirect(w ResponseWriter, r *Request, urlStr string, code int) {
 			}
 
 			// no leading http://server
-			if urlStr == "" || urlStr[0] != '/' {
+			if url == "" || url[0] != '/' {
 				// make relative path absolute
 				olddir, _ := path.Split(oldpath)
-				urlStr = olddir + urlStr
+				url = olddir + url
 			}
 
 			var query string
-			if i := strings.Index(urlStr, "?"); i != -1 {
-				urlStr, query = urlStr[:i], urlStr[i:]
+			if i := strings.Index(url, "?"); i != -1 {
+				url, query = url[:i], url[i:]
 			}
 
 			// clean up but preserve trailing slash
-			trailing := strings.HasSuffix(urlStr, "/")
-			urlStr = path.Clean(urlStr)
-			if trailing && !strings.HasSuffix(urlStr, "/") {
-				urlStr += "/"
+			trailing := strings.HasSuffix(url, "/")
+			url = path.Clean(url)
+			if trailing && !strings.HasSuffix(url, "/") {
+				url += "/"
 			}
-			urlStr += query
+			url += query
 		}
 	}
-
-	w.Header().Set("Location", hexEscapeNonASCII(urlStr))
-	w.WriteHeader(code)
 
 	// RFC 2616 recommends that a short note "SHOULD" be included in the
 	// response because older user agents may not understand 301/307.
 	// Shouldn't send the response for POST or HEAD; that leaves GET.
-	if r.Method == "GET" {
-		note := "<a href=\"" + htmlEscape(urlStr) + "\">" + statusText[code] + "</a>.\n"
+	writeNote := r.Method == "GET"
+
+	w.Header().Set("Location", hexEscapeNonASCII(url))
+	if writeNote {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	}
+	w.WriteHeader(code)
+	if writeNote {
+		note := "<a href=\"" + htmlEscape(url) + "\">" + statusText[code] + "</a>.\n"
 		fmt.Fprintln(w, note)
 	}
 }
+
+// parseURL is just url.Parse. It exists only so that url.Parse can be called
+// in places where url is shadowed for godoc. See https://golang.org/cl/49930.
+var parseURL = url.Parse
 
 var htmlReplacer = strings.NewReplacer(
 	"&", "&amp;",
@@ -2252,7 +2268,7 @@ func (mux *ServeMux) Handle(pattern string, handler Handler) {
 	defer mux.mu.Unlock()
 
 	if pattern == "" {
-		panic("http: invalid pattern " + pattern)
+		panic("http: invalid pattern")
 	}
 	if handler == nil {
 		panic("http: nil handler")
@@ -2314,12 +2330,27 @@ func Serve(l net.Listener, handler Handler) error {
 	return srv.Serve(l)
 }
 
+// Serve accepts incoming HTTPS connections on the listener l,
+// creating a new service goroutine for each. The service goroutines
+// read requests and then call handler to reply to them.
+//
+// Handler is typically nil, in which case the DefaultServeMux is used.
+//
+// Additionally, files containing a certificate and matching private key
+// for the server must be provided. If the certificate is signed by a
+// certificate authority, the certFile should be the concatenation
+// of the server's certificate, any intermediates, and the CA's certificate.
+func ServeTLS(l net.Listener, handler Handler, certFile, keyFile string) error {
+	srv := &Server{Handler: handler}
+	return srv.ServeTLS(l, certFile, keyFile)
+}
+
 // A Server defines parameters for running an HTTP server.
 // The zero value for Server is a valid configuration.
 type Server struct {
 	Addr      string      // TCP address to listen on, ":http" if empty
 	Handler   Handler     // handler to invoke, http.DefaultServeMux if nil
-	TLSConfig *tls.Config // optional TLS config, used by ListenAndServeTLS
+	TLSConfig *tls.Config // optional TLS config, used by ServeTLS and ListenAndServeTLS
 
 	// ReadTimeout is the maximum duration for reading the entire
 	// request, including the body.
@@ -2345,7 +2376,7 @@ type Server struct {
 	// IdleTimeout is the maximum amount of time to wait for the
 	// next request when keep-alives are enabled. If IdleTimeout
 	// is zero, the value of ReadTimeout is used. If both are
-	// zero, there is no timeout.
+	// zero, ReadHeaderTimeout is used.
 	IdleTimeout time.Duration
 
 	// MaxHeaderBytes controls the maximum number of bytes the
@@ -2372,9 +2403,9 @@ type Server struct {
 	ConnState func(net.Conn, ConnState)
 
 	// ErrorLog specifies an optional logger for errors accepting
-	// connections and unexpected behavior from handlers.
-	// If nil, logging goes to os.Stderr via the log package's
-	// standard logger.
+	// connections, unexpected behavior from handlers, and
+	// underlying FileSystem errors.
+	// If nil, logging is done via the log package's standard logger.
 	ErrorLog *log.Logger
 
 	disableKeepAlives int32     // accessed atomically.
@@ -2386,6 +2417,7 @@ type Server struct {
 	listeners  map[net.Listener]struct{}
 	activeConn map[*conn]struct{}
 	doneChan   chan struct{}
+	onShutdown []func()
 }
 
 func (s *Server) getDoneChan() <-chan struct{} {
@@ -2458,7 +2490,8 @@ var shutdownPollInterval = 500 * time.Millisecond
 // Shutdown does not attempt to close nor wait for hijacked
 // connections such as WebSockets. The caller of Shutdown should
 // separately notify such long-lived connections of shutdown and wait
-// for them to close, if desired.
+// for them to close, if desired. See RegisterOnShutdown for a way to
+// register shutdown notification functions.
 func (srv *Server) Shutdown(ctx context.Context) error {
 	atomic.AddInt32(&srv.inShutdown, 1)
 	defer atomic.AddInt32(&srv.inShutdown, -1)
@@ -2466,6 +2499,9 @@ func (srv *Server) Shutdown(ctx context.Context) error {
 	srv.mu.Lock()
 	lnerr := srv.closeListenersLocked()
 	srv.closeDoneChanLocked()
+	for _, f := range srv.onShutdown {
+		go f()
+	}
 	srv.mu.Unlock()
 
 	ticker := time.NewTicker(shutdownPollInterval)
@@ -2480,6 +2516,17 @@ func (srv *Server) Shutdown(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// RegisterOnShutdown registers a function to call on Shutdown.
+// This can be used to gracefully shutdown connections that have
+// undergone NPN/ALPN protocol upgrade or that have been hijacked.
+// This function should start protocol-specific graceful shutdown,
+// but should not wait for shutdown to complete.
+func (srv *Server) RegisterOnShutdown(f func()) {
+	srv.mu.Lock()
+	srv.onShutdown = append(srv.onShutdown, f)
+	srv.mu.Unlock()
 }
 
 // closeIdleConns closes all idle connections and reports whether the
@@ -2621,7 +2668,7 @@ func (srv *Server) shouldConfigureHTTP2ForServe() bool {
 	return strSliceContains(srv.TLSConfig.NextProtos, http2NextProtoTLS)
 }
 
-// ErrServerClosed is returned by the Server's Serve, ListenAndServe,
+// ErrServerClosed is returned by the Server's Serve, ServeTLS, ListenAndServe,
 // and ListenAndServeTLS methods after a call to Shutdown or Close.
 var ErrServerClosed = errors.New("http: Server closed")
 
@@ -2680,6 +2727,49 @@ func (srv *Server) Serve(l net.Listener) error {
 		c.setState(c.rwc, StateNew) // before Serve can return
 		go c.serve(ctx)
 	}
+}
+
+// ServeTLS accepts incoming connections on the Listener l, creating a
+// new service goroutine for each. The service goroutines read requests and
+// then call srv.Handler to reply to them.
+//
+// Additionally, files containing a certificate and matching private key for
+// the server must be provided if neither the Server's TLSConfig.Certificates
+// nor TLSConfig.GetCertificate are populated.. If the certificate is signed by
+// a certificate authority, the certFile should be the concatenation of the
+// server's certificate, any intermediates, and the CA's certificate.
+//
+// For HTTP/2 support, srv.TLSConfig should be initialized to the
+// provided listener's TLS Config before calling Serve. If
+// srv.TLSConfig is non-nil and doesn't include the string "h2" in
+// Config.NextProtos, HTTP/2 support is not enabled.
+//
+// ServeTLS always returns a non-nil error. After Shutdown or Close, the
+// returned error is ErrServerClosed.
+func (srv *Server) ServeTLS(l net.Listener, certFile, keyFile string) error {
+	// Setup HTTP/2 before srv.Serve, to initialize srv.TLSConfig
+	// before we clone it and create the TLS Listener.
+	if err := srv.setupHTTP2_ServeTLS(); err != nil {
+		return err
+	}
+
+	config := cloneTLSConfig(srv.TLSConfig)
+	if !strSliceContains(config.NextProtos, "http/1.1") {
+		config.NextProtos = append(config.NextProtos, "http/1.1")
+	}
+
+	configHasCert := len(config.Certificates) > 0 || config.GetCertificate != nil
+	if !configHasCert || certFile != "" || keyFile != "" {
+		var err error
+		config.Certificates = make([]tls.Certificate, 1)
+		config.Certificates[0], err = tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return err
+		}
+	}
+
+	tlsListener := tls.NewListener(l, config)
+	return srv.Serve(tlsListener)
 }
 
 func (s *Server) trackListener(ln net.Listener, add bool) {
@@ -2761,6 +2851,18 @@ func (srv *Server) SetKeepAlivesEnabled(v bool) {
 
 func (s *Server) logf(format string, args ...interface{}) {
 	if s.ErrorLog != nil {
+		s.ErrorLog.Printf(format, args...)
+	} else {
+		log.Printf(format, args...)
+	}
+}
+
+// logf prints to the ErrorLog of the *Server associated with request r
+// via ServerContextKey. If there's no associated server, or if ErrorLog
+// is nil, logging is done via the log package's standard logger.
+func logf(r *Request, format string, args ...interface{}) {
+	s, _ := r.Context().Value(ServerContextKey).(*Server)
+	if s != nil && s.ErrorLog != nil {
 		s.ErrorLog.Printf(format, args...)
 	} else {
 		log.Printf(format, args...)
@@ -2853,47 +2955,25 @@ func (srv *Server) ListenAndServeTLS(certFile, keyFile string) error {
 		addr = ":https"
 	}
 
-	// Setup HTTP/2 before srv.Serve, to initialize srv.TLSConfig
-	// before we clone it and create the TLS Listener.
-	if err := srv.setupHTTP2_ListenAndServeTLS(); err != nil {
-		return err
-	}
-
-	config := cloneTLSConfig(srv.TLSConfig)
-	if !strSliceContains(config.NextProtos, "http/1.1") {
-		config.NextProtos = append(config.NextProtos, "http/1.1")
-	}
-
-	configHasCert := len(config.Certificates) > 0 || config.GetCertificate != nil
-	if !configHasCert || certFile != "" || keyFile != "" {
-		var err error
-		config.Certificates = make([]tls.Certificate, 1)
-		config.Certificates[0], err = tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
-			return err
-		}
-	}
-
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
 
-	tlsListener := tls.NewListener(tcpKeepAliveListener{ln.(*net.TCPListener)}, config)
-	return srv.Serve(tlsListener)
+	return srv.ServeTLS(tcpKeepAliveListener{ln.(*net.TCPListener)}, certFile, keyFile)
 }
 
-// setupHTTP2_ListenAndServeTLS conditionally configures HTTP/2 on
+// setupHTTP2_ServeTLS conditionally configures HTTP/2 on
 // srv and returns whether there was an error setting it up. If it is
 // not configured for policy reasons, nil is returned.
-func (srv *Server) setupHTTP2_ListenAndServeTLS() error {
+func (srv *Server) setupHTTP2_ServeTLS() error {
 	srv.nextProtoOnce.Do(srv.onceSetNextProtoDefaults)
 	return srv.nextProtoErr
 }
 
 // setupHTTP2_Serve is called from (*Server).Serve and conditionally
 // configures HTTP/2 on srv using a more conservative policy than
-// setupHTTP2_ListenAndServeTLS because Serve may be called
+// setupHTTP2_ServeTLS because Serve may be called
 // concurrently.
 //
 // The tests named TestTransportAutomaticHTTP2* and
@@ -2955,9 +3035,9 @@ type timeoutHandler struct {
 	body    string
 	dt      time.Duration
 
-	// When set, no timer will be created and this channel will
+	// When set, no context will be created and this context will
 	// be used instead.
-	testTimeout <-chan time.Time
+	testContext context.Context
 }
 
 func (h *timeoutHandler) errorBody() string {
@@ -2968,12 +3048,13 @@ func (h *timeoutHandler) errorBody() string {
 }
 
 func (h *timeoutHandler) ServeHTTP(w ResponseWriter, r *Request) {
-	var t *time.Timer
-	timeout := h.testTimeout
-	if timeout == nil {
-		t = time.NewTimer(h.dt)
-		timeout = t.C
+	ctx := h.testContext
+	if ctx == nil {
+		var cancelCtx context.CancelFunc
+		ctx, cancelCtx = context.WithTimeout(r.Context(), h.dt)
+		defer cancelCtx()
 	}
+	r = r.WithContext(ctx)
 	done := make(chan struct{})
 	tw := &timeoutWriter{
 		w: w,
@@ -2996,10 +3077,7 @@ func (h *timeoutHandler) ServeHTTP(w ResponseWriter, r *Request) {
 		}
 		w.WriteHeader(tw.code)
 		w.Write(tw.wbuf.Bytes())
-		if t != nil {
-			t.Stop()
-		}
-	case <-timeout:
+	case <-ctx.Done():
 		tw.mu.Lock()
 		defer tw.mu.Unlock()
 		w.WriteHeader(StatusServiceUnavailable)

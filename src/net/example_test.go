@@ -12,7 +12,8 @@ import (
 )
 
 func ExampleListener() {
-	// Listen on TCP port 2000 on all interfaces.
+	// Listen on TCP port 2000 on all available unicast and
+	// anycast IP addresses of the local system.
 	l, err := net.Listen("tcp", ":2000")
 	if err != nil {
 		log.Fatal(err)
@@ -63,6 +64,41 @@ func ExampleParseCIDR() {
 	// 192.0.2.0/24
 	// 2001:db8:a0b:12f0::1
 	// 2001:db8::/32
+}
+
+func ExampleParseIP() {
+	fmt.Println(net.ParseIP("192.0.2.1"))
+	fmt.Println(net.ParseIP("2001:db8::68"))
+	fmt.Println(net.ParseIP("192.0.2"))
+
+	// Output:
+	// 192.0.2.1
+	// 2001:db8::68
+	// <nil>
+}
+
+func ExampleIP_DefaultMask() {
+	ip := net.ParseIP("192.0.2.1")
+	fmt.Println(ip.DefaultMask())
+
+	// Output:
+	// ffffff00
+}
+
+func ExampleIP_Mask() {
+	ipv4Addr := net.ParseIP("192.0.2.1")
+	// This mask corresponds to a /24 subnet for IPv4.
+	ipv4Mask := net.CIDRMask(24, 32)
+	fmt.Println(ipv4Addr.Mask(ipv4Mask))
+
+	ipv6Addr := net.ParseIP("2001:db8:a0b:12f0::1")
+	// This mask corresponds to a /32 subnet for IPv6.
+	ipv6Mask := net.CIDRMask(32, 128)
+	fmt.Println(ipv6Addr.Mask(ipv6Mask))
+
+	// Output:
+	// 192.0.2.0
+	// 2001:db8::
 }
 
 func ExampleCIDRMask() {

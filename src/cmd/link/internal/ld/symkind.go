@@ -97,13 +97,14 @@ const (
 	SMACHOSYMTAB
 	SMACHOINDIRECTPLT
 	SMACHOINDIRECTGOT
-	SFILE
 	SFILEPATH
 	SCONST
 	SDYNIMPORT
 	SHOSTOBJ
 	SDWARFSECT
 	SDWARFINFO
+	SDWARFRANGE
+	SDWARFLOC
 	SSUB       = SymKind(1 << 8)
 	SMASK      = SymKind(SSUB - 1)
 	SHIDDEN    = SymKind(1 << 9)
@@ -122,6 +123,8 @@ var abiSymKindToSymKind = [...]SymKind{
 	SNOPTRBSS,
 	STLSBSS,
 	SDWARFINFO,
+	SDWARFRANGE,
+	SDWARFLOC,
 }
 
 // readOnly are the symbol kinds that form read-only sections. In some

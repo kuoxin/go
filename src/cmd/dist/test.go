@@ -60,7 +60,6 @@ type tester struct {
 	goroot     string
 	goarch     string
 	gohostarch string
-	goarm      string
 	goos       string
 	gohostos   string
 	cgoEnabled bool
@@ -104,7 +103,6 @@ func (t *tester) run() {
 	t.gohostos = mustEnv("GOHOSTOS")
 	t.goarch = mustEnv("GOARCH")
 	t.gohostarch = mustEnv("GOHOSTARCH")
-	t.goarm = os.Getenv("GOARM")
 	slurp, err := exec.Command("go", "env", "CGO_ENABLED").Output()
 	if err != nil {
 		log.Fatalf("Error running go env CGO_ENABLED: %v", err)
@@ -355,27 +353,6 @@ func (t *tester) registerTests() {
 		return
 	}
 
-	// This test needs its stdout/stderr to be terminals, so we don't run it from cmd/go's tests.
-	// See issue 18153.
-	if t.goos == "linux" {
-		t.tests = append(t.tests, distTest{
-			name:    "cmd_go_test_terminal",
-			heading: "cmd/go terminal test",
-			fn: func(dt *distTest) error {
-				t.runPending(dt)
-				if !stdOutErrAreTerminals() {
-					fmt.Println("skipping terminal test; stdout/stderr not terminals")
-					return nil
-				}
-				cmd := exec.Command("go", "test")
-				cmd.Dir = filepath.Join(os.Getenv("GOROOT"), "src/cmd/go/testdata/testterminal18153")
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				return cmd.Run()
-			},
-		})
-	}
-
 	// Fast path to avoid the ~1 second of `go list std cmd` when
 	// the caller lists specific tests to run. (as the continuous
 	// build coordinator does).
@@ -436,6 +413,74 @@ func (t *tester) registerTests() {
 		})
 	}
 
+	// This test needs its stdout/stderr to be terminals, so we don't run it from cmd/go's tests.
+	// See issue 18153.
+	if t.goos == "linux" {
+		t.tests = append(t.tests, distTest{
+			name:    "cmd_go_test_terminal",
+			heading: "cmd/go terminal test",
+			fn: func(dt *distTest) error {
+				t.runPending(dt)
+				if !stdOutErrAreTerminals() {
+					fmt.Println("skipping terminal test; stdout/stderr not terminals")
+					return nil
+				}
+				cmd := exec.Command("go", "test")
+				cmd.Dir = filepath.Join(os.Getenv("GOROOT"), "src/cmd/go/testdata/testterminal18153")
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				return cmd.Run()
+			},
+		})
+	}
+
+	// On the builders only, test that a moved GOROOT still works.
+	// Fails on iOS because CC_FOR_TARGET refers to clangwrap.sh
+	// in the unmoved GOROOT.
+	// Fails on Android with an exec format error.
+	// Fails on plan9 with "cannot find GOROOT" (issue #21016).
+	if os.Getenv("GO_BUILDER_NAME") != "" && t.goos != "android" && !t.iOS() && t.goos != "plan9" {
+		t.tests = append(t.tests, distTest{
+			name:    "moved_goroot",
+			heading: "moved GOROOT",
+			fn: func(dt *distTest) error {
+				t.runPending(dt)
+				moved := t.goroot + "-moved"
+				if err := os.Rename(t.goroot, moved); err != nil {
+					if t.goos == "windows" {
+						// Fails on Windows (with "Access is denied") if a process
+						// or binary is in this directory. For instance, using all.bat
+						// when run from c:\workdir\go\src fails here
+						// if GO_BUILDER_NAME is set. Our builders invoke tests
+						// a different way which happens to work when sharding
+						// tests, but we should be tolerant of the non-sharded
+						// all.bat case.
+						log.Printf("skipping test on Windows")
+						return nil
+					}
+					return err
+				}
+
+				// Run `go test fmt` in the moved GOROOT.
+				cmd := exec.Command(filepath.Join(moved, "bin", "go"), "test", "fmt")
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				// Don't set GOROOT in the environment.
+				for _, e := range os.Environ() {
+					if !strings.HasPrefix(e, "GOROOT=") {
+						cmd.Env = append(cmd.Env, e)
+					}
+				}
+				err := cmd.Run()
+
+				if rerr := os.Rename(moved, t.goroot); rerr != nil {
+					log.Fatalf("failed to restore GOROOT: %v", rerr)
+				}
+				return err
+			},
+		})
+	}
+
 	// Test that internal linking of standard packages does not
 	// require libgcc. This ensures that we can install a Go
 	// release on a system that does not have a C compiler
@@ -490,6 +535,14 @@ func (t *tester) registerTests() {
 		},
 	})
 
+	if t.raceDetectorSupported() {
+		t.tests = append(t.tests, distTest{
+			name:    "race",
+			heading: "Testing race detector",
+			fn:      t.raceTest,
+		})
+	}
+
 	if t.cgoEnabled && !t.iOS() {
 		// Disabled on iOS. golang.org/issue/15919
 		t.tests = append(t.tests, distTest{
@@ -531,14 +584,6 @@ func (t *tester) registerTests() {
 		})
 	}
 
-	if t.raceDetectorSupported() {
-		t.tests = append(t.tests, distTest{
-			name:    "race",
-			heading: "Testing race detector",
-			fn:      t.raceTest,
-		})
-	}
-
 	if t.hasBash() && t.cgoEnabled && t.goos != "android" && t.goos != "darwin" {
 		t.registerTest("testgodefs", "../misc/cgo/testgodefs", "./test.bash")
 	}
@@ -563,7 +608,7 @@ func (t *tester) registerTests() {
 			t.registerHostTest("testcarchive", "../misc/cgo/testcarchive", "misc/cgo/testcarchive", "carchive_test.go")
 		}
 		if t.supportedBuildmode("c-shared") {
-			t.registerTest("testcshared", "../misc/cgo/testcshared", "./test.bash")
+			t.registerHostTest("testcshared", "../misc/cgo/testcshared", "misc/cgo/testcshared", "cshared_test.go")
 		}
 		if t.supportedBuildmode("shared") {
 			t.registerTest("testshared", "../misc/cgo/testshared", "go", "test")
@@ -575,7 +620,7 @@ func (t *tester) registerTests() {
 			t.registerTest("testasan", "../misc/cgo/testasan", "go", "run", "main.go")
 		}
 		if t.goos == "linux" && t.goarch == "amd64" {
-			t.registerTest("testsanitizers", "../misc/cgo/testsanitizers", "./test.bash")
+			t.registerHostTest("testsanitizers/msan", "../misc/cgo/testsanitizers", "misc/cgo/testsanitizers", ".")
 		}
 		if t.hasBash() && t.goos != "android" && !t.iOS() && t.gohostos != "windows" {
 			t.registerTest("cgo_errors", "../misc/cgo/errors", "./test.bash")
@@ -772,13 +817,14 @@ func (t *tester) supportedBuildmode(mode string) bool {
 		}
 		switch pair {
 		case "darwin-386", "darwin-amd64", "darwin-arm", "darwin-arm64",
-			"linux-amd64", "linux-386", "windows-amd64", "windows-386":
+			"linux-amd64", "linux-386", "linux-ppc64le",
+			"windows-amd64", "windows-386":
 			return true
 		}
 		return false
 	case "c-shared":
 		switch pair {
-		case "linux-386", "linux-amd64", "linux-arm", "linux-arm64",
+		case "linux-386", "linux-amd64", "linux-arm", "linux-arm64", "linux-ppc64le",
 			"darwin-amd64", "darwin-386",
 			"android-arm", "android-arm64", "android-386":
 			return true
@@ -796,12 +842,6 @@ func (t *tester) supportedBuildmode(mode string) bool {
 			// causing build failures potentially
 			// obscuring other issues. This is hopefully a
 			// temporary workaround. See golang.org/issue/17937.
-			return false
-		}
-
-		if pair == "linux-arm" && t.goarm == "5" {
-			// Skip the plugin tests for now on ARMv5 because it causes a
-			// SIGILL. See https://golang.org/issue/19674
 			return false
 		}
 

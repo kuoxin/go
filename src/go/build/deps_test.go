@@ -226,7 +226,7 @@ var pkgDeps = map[string][]string{
 	"go/types":                  {"L4", "GOPARSER", "container/heap", "go/constant"},
 
 	// One of a kind.
-	"archive/tar":              {"L4", "OS", "syscall"},
+	"archive/tar":              {"L4", "OS", "syscall", "os/user"},
 	"archive/zip":              {"L4", "OS", "compress/flate"},
 	"container/heap":           {"sort"},
 	"compress/bzip2":           {"L4"},
@@ -377,7 +377,7 @@ var pkgDeps = map[string][]string{
 	},
 	"crypto/x509": {
 		"L4", "CRYPTO-MATH", "OS", "CGO",
-		"crypto/x509/pkix", "encoding/pem", "encoding/hex", "net", "syscall",
+		"crypto/x509/pkix", "encoding/pem", "encoding/hex", "net", "os/user", "syscall",
 	},
 	"crypto/x509/pkix": {"L4", "CRYPTO-MATH"},
 

@@ -402,7 +402,7 @@ func ssaGenValue(s *gc.SSAGenState, v *ssa.Value) {
 		p.To.Type = obj.TYPE_REGREG
 		p.To.Reg = v.Reg0()           // high 32-bit
 		p.To.Offset = int64(v.Reg1()) // low 32-bit
-	case ssa.OpARMMULA:
+	case ssa.OpARMMULA, ssa.OpARMMULS:
 		p := s.Prog(v.Op.Asm())
 		p.From.Type = obj.TYPE_REG
 		p.From.Reg = v.Args[0].Reg()
@@ -464,6 +464,7 @@ func ssaGenValue(s *gc.SSAGenState, v *ssa.Value) {
 	case ssa.OpARMMOVWaddr:
 		p := s.Prog(arm.AMOVW)
 		p.From.Type = obj.TYPE_ADDR
+		p.From.Reg = v.Args[0].Reg()
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = v.Reg()
 
@@ -485,7 +486,6 @@ func ssaGenValue(s *gc.SSAGenState, v *ssa.Value) {
 		case nil:
 			// No sym, just MOVW $off(SP), R
 			wantreg = "SP"
-			p.From.Reg = arm.REGSP
 			p.From.Offset = v.AuxInt
 		}
 		if reg := v.Args[0].RegName(); reg != wantreg {
@@ -516,7 +516,7 @@ func ssaGenValue(s *gc.SSAGenState, v *ssa.Value) {
 		p.To.Type = obj.TYPE_MEM
 		p.To.Reg = v.Args[0].Reg()
 		gc.AddAux(&p.To, v)
-	case ssa.OpARMMOVWloadidx:
+	case ssa.OpARMMOVWloadidx, ssa.OpARMMOVBUloadidx, ssa.OpARMMOVBloadidx, ssa.OpARMMOVHUloadidx, ssa.OpARMMOVHloadidx:
 		// this is just shift 0 bits
 		fallthrough
 	case ssa.OpARMMOVWloadshiftLL:
@@ -528,7 +528,7 @@ func ssaGenValue(s *gc.SSAGenState, v *ssa.Value) {
 	case ssa.OpARMMOVWloadshiftRA:
 		p := genshift(s, v.Op.Asm(), 0, v.Args[1].Reg(), v.Reg(), arm.SHIFT_AR, v.AuxInt)
 		p.From.Reg = v.Args[0].Reg()
-	case ssa.OpARMMOVWstoreidx:
+	case ssa.OpARMMOVWstoreidx, ssa.OpARMMOVBstoreidx, ssa.OpARMMOVHstoreidx:
 		// this is just shift 0 bits
 		fallthrough
 	case ssa.OpARMMOVWstoreshiftLL:

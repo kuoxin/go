@@ -37,6 +37,9 @@ expect() {
 check err1.go
 check err2.go
 check err3.go
+if [ $(go env GOARCH) == "amd64" ]; then # If we find a portable test case, we can remove this.
+	check err4.go
+fi
 check issue7757.go
 check issue8442.go
 check issue11097a.go
@@ -48,6 +51,7 @@ check issue13830.go
 check issue16116.go
 check issue16591.go
 check issue18889.go
+expect issue18452.go issue18452.go:16 issue18452.go:17
 
 if ! go build issue14669.go; then
 	exit 1

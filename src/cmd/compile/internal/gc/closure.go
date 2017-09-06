@@ -5,19 +5,21 @@
 package gc
 
 import (
+	"cmd/compile/internal/syntax"
 	"cmd/compile/internal/types"
 	"fmt"
 )
 
-// function literals aka closures
-func closurehdr(ntype *Node) {
-	n := nod(OCLOSURE, nil, nil)
+func (p *noder) funcLit(expr *syntax.FuncLit) *Node {
+	ntype := p.typeExpr(expr.Type)
+
+	n := p.nod(expr, OCLOSURE, nil, nil)
 	n.Func.SetIsHiddenClosure(Curfn != nil)
 	n.Func.Ntype = ntype
 	n.Func.Depth = funcdepth
 	n.Func.Outerfunc = Curfn
 
-	funchdr(n)
+	old := p.funchdr(n)
 
 	// steal ntype's argument names and
 	// leave a fresh copy in their place.
@@ -25,8 +27,8 @@ func closurehdr(ntype *Node) {
 	// refer to the variables in the external
 	// function declared below; see walkclosure.
 	n.List.Set(ntype.List.Slice())
-
 	n.Rlist.Set(ntype.Rlist.Slice())
+
 	ntype.List.Set(nil)
 	ntype.Rlist.Set(nil)
 	for _, n1 := range n.List.Slice() {
@@ -48,23 +50,23 @@ func closurehdr(ntype *Node) {
 		}
 		ntype.Rlist.Append(nod(ODCLFIELD, name, n2.Right))
 	}
-}
 
-func closurebody(body []*Node) *Node {
+	body := p.stmts(expr.Body.List)
+
+	lineno = Ctxt.PosTable.XPos(expr.Body.Rbrace)
 	if len(body) == 0 {
 		body = []*Node{nod(OEMPTY, nil, nil)}
 	}
 
-	func_ := Curfn
-	func_.Nbody.Set(body)
-	func_.Func.Endlineno = lineno
-	funcbody(func_)
+	n.Nbody.Set(body)
+	n.Func.Endlineno = lineno
+	p.funcbody(old)
 
 	// closure-specific variables are hanging off the
 	// ordinary ones in the symbol table; see oldname.
 	// unhook them.
 	// make the list of pointers for the closure call.
-	for _, v := range func_.Func.Cvars.Slice() {
+	for _, v := range n.Func.Cvars.Slice() {
 		// Unlink from v1; see comment in syntax.go type Param for these fields.
 		v1 := v.Name.Defn
 		v1.Name.Param.Innermost = v.Name.Param.Outer
@@ -100,7 +102,7 @@ func closurebody(body []*Node) *Node {
 		v.Name.Param.Outer = oldname(v.Sym)
 	}
 
-	return func_
+	return n
 }
 
 func typecheckclosure(func_ *Node, top int) {
@@ -227,7 +229,11 @@ func makeclosure(func_ *Node) *Node {
 
 	xfunc.Nbody.Set(func_.Nbody.Slice())
 	xfunc.Func.Dcl = append(func_.Func.Dcl, xfunc.Func.Dcl...)
+	xfunc.Func.Parents = func_.Func.Parents
+	xfunc.Func.Marks = func_.Func.Marks
 	func_.Func.Dcl = nil
+	func_.Func.Parents = nil
+	func_.Func.Marks = nil
 	if xfunc.Nbody.Len() == 0 {
 		Fatalf("empty body - won't generate any code")
 	}
@@ -457,9 +463,8 @@ func walkclosure(func_ *Node, init *Nodes) *Node {
 			Warnl(func_.Pos, "closure converted to global")
 		}
 		return func_.Func.Closure.Func.Nname
-	} else {
-		closuredebugruntimecheck(func_)
 	}
+	closuredebugruntimecheck(func_)
 
 	// Create closure in the form of a composite literal.
 	// supposing the closure captures an int i and a string s
@@ -640,7 +645,7 @@ func makepartialcall(fn *Node, t0 *types.Type, meth *types.Sym) *Node {
 	call := nod(OCALL, nodSym(OXDOT, ptr, meth), nil)
 	call.List.Set(callargs)
 	call.SetIsddd(ddd)
-	if t0.Results().NumFields() == 0 {
+	if t0.NumResults() == 0 {
 		body = append(body, call)
 	} else {
 		n := nod(OAS2, nil, nil)

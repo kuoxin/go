@@ -54,6 +54,7 @@ type File struct {
 	Calls    []*Call             // all calls to C.xxx in AST
 	ExpFunc  []*ExpFunc          // exported functions for this file
 	Name     map[string]*Name    // map from Go name to Name
+	NamePos  map[*Name]token.Pos // map from Name to position of the first reference
 }
 
 func nameKeys(m map[string]*Name) []string {
@@ -88,7 +89,7 @@ type Name struct {
 	Mangle   string // name used in generated Go
 	C        string // name used in C
 	Define   string // #define expansion
-	Kind     string // "iconst", "fconst", "sconst", "type", "var", "fpvar", "func", "not-type"
+	Kind     string // "iconst", "fconst", "sconst", "type", "var", "fpvar", "func", "macro", "not-type"
 	Type     *Type  // the type of xxx
 	FuncType *FuncType
 	AddError bool
@@ -102,7 +103,7 @@ func (n *Name) IsVar() bool {
 
 // IsConst reports whether Kind is either "iconst", "fconst" or "sconst"
 func (n *Name) IsConst() bool {
-	return n.Kind == "iconst" || n.Kind == "fconst" || n.Kind == "sconst"
+	return strings.HasSuffix(n.Kind, "const")
 }
 
 // A ExpFunc is an exported function, callable from C.

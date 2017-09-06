@@ -22,7 +22,7 @@ const (
 	tflagNamed     tflag = 1 << 2
 )
 
-// Needs to be in sync with ../cmd/compile/internal/ld/decodesym.go:/^func.commonsize,
+// Needs to be in sync with ../cmd/link/internal/ld/decodesym.go:/^func.commonsize,
 // ../cmd/compile/internal/gc/reflect.go:/^func.dcommontype and
 // ../reflect/type.go:/^type.rtype.
 type _type struct {
@@ -655,13 +655,13 @@ func typesEqual(t, v *_type, seen map[_typePair]struct{}) bool {
 		if len(st.fields) != len(sv.fields) {
 			return false
 		}
+		if st.pkgPath.name() != sv.pkgPath.name() {
+			return false
+		}
 		for i := range st.fields {
 			tf := &st.fields[i]
 			vf := &sv.fields[i]
 			if tf.name.name() != vf.name.name() {
-				return false
-			}
-			if tf.name.pkgPath() != vf.name.pkgPath() {
 				return false
 			}
 			if !typesEqual(tf.typ, vf.typ, seen) {

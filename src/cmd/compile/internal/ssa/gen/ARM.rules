@@ -485,12 +485,13 @@
 (MOVDstore [off1] {sym1} (MOVWaddr [off2] {sym2} ptr) val mem) && canMergeSym(sym1,sym2) ->
 	(MOVDstore [off1+off2] {mergeSym(sym1,sym2)} ptr val mem)
 
-// replace load from same location as preceding store with copy
-(MOVBload [off] {sym} ptr (MOVBstore [off2] {sym2} ptr2 x _)) && sym == sym2 && off == off2 && isSamePtr(ptr, ptr2) && isSigned(x.Type) -> x
-(MOVBUload [off] {sym} ptr (MOVBstore [off2] {sym2} ptr2 x _)) && sym == sym2 && off == off2 && isSamePtr(ptr, ptr2) && !isSigned(x.Type) -> x
-(MOVHload [off] {sym} ptr (MOVHstore [off2] {sym2} ptr2 x _)) && sym == sym2 && off == off2 && isSamePtr(ptr, ptr2) && isSigned(x.Type) -> x
-(MOVHUload [off] {sym} ptr (MOVHstore [off2] {sym2} ptr2 x _)) && sym == sym2 && off == off2 && isSamePtr(ptr, ptr2) && !isSigned(x.Type) -> x
+// replace load from same location as preceding store with zero/sign extension (or copy in case of full width)
+(MOVBload [off] {sym} ptr (MOVBstore [off2] {sym2} ptr2 x _)) && sym == sym2 && off == off2 && isSamePtr(ptr, ptr2) -> (MOVBreg x)
+(MOVBUload [off] {sym} ptr (MOVBstore [off2] {sym2} ptr2 x _)) && sym == sym2 && off == off2 && isSamePtr(ptr, ptr2) -> (MOVBUreg x)
+(MOVHload [off] {sym} ptr (MOVHstore [off2] {sym2} ptr2 x _)) && sym == sym2 && off == off2 && isSamePtr(ptr, ptr2) -> (MOVHreg x)
+(MOVHUload [off] {sym} ptr (MOVHstore [off2] {sym2} ptr2 x _)) && sym == sym2 && off == off2 && isSamePtr(ptr, ptr2) -> (MOVHUreg x)
 (MOVWload [off] {sym} ptr (MOVWstore [off2] {sym2} ptr2 x _)) && sym == sym2 && off == off2 && isSamePtr(ptr, ptr2) -> x
+
 (MOVFload [off] {sym} ptr (MOVFstore [off2] {sym2} ptr2 x _)) && sym == sym2 && off == off2 && isSamePtr(ptr, ptr2) -> x
 (MOVDload [off] {sym} ptr (MOVDstore [off2] {sym2} ptr2 x _)) && sym == sym2 && off == off2 && isSamePtr(ptr, ptr2) -> x
 
@@ -498,6 +499,10 @@
 (MOVWloadshiftLL ptr idx [c] (MOVWstoreshiftLL ptr2 idx [d] x _)) && c==d && isSamePtr(ptr, ptr2) -> x
 (MOVWloadshiftRL ptr idx [c] (MOVWstoreshiftRL ptr2 idx [d] x _)) && c==d && isSamePtr(ptr, ptr2) -> x
 (MOVWloadshiftRA ptr idx [c] (MOVWstoreshiftRA ptr2 idx [d] x _)) && c==d && isSamePtr(ptr, ptr2) -> x
+(MOVBUloadidx ptr idx (MOVBstoreidx ptr2 idx x _)) && isSamePtr(ptr, ptr2) -> (MOVBUreg x)
+(MOVBloadidx ptr idx (MOVBstoreidx ptr2 idx x _)) && isSamePtr(ptr, ptr2) -> (MOVBreg x)
+(MOVHUloadidx ptr idx (MOVHstoreidx ptr2 idx x _)) && isSamePtr(ptr, ptr2) -> (MOVHUreg x)
+(MOVHloadidx ptr idx (MOVHstoreidx ptr2 idx x _)) && isSamePtr(ptr, ptr2) -> (MOVHreg x)
 
 // fold constant into arithmatic ops
 (ADD x (MOVWconst [c])) -> (ADDconst [c] x)
@@ -596,6 +601,28 @@
 (MULA (MOVWconst [c]) x a) && c%5 == 0 && isPowerOfTwo(c/5) && is32Bit(c) -> (ADD (SLLconst <x.Type> [log2(c/5)] (ADDshiftLL <x.Type> x x [2])) a)
 (MULA (MOVWconst [c]) x a) && c%7 == 0 && isPowerOfTwo(c/7) && is32Bit(c) -> (ADD (SLLconst <x.Type> [log2(c/7)] (RSBshiftLL <x.Type> x x [3])) a)
 (MULA (MOVWconst [c]) x a) && c%9 == 0 && isPowerOfTwo(c/9) && is32Bit(c) -> (ADD (SLLconst <x.Type> [log2(c/9)] (ADDshiftLL <x.Type> x x [3])) a)
+
+(MULS x (MOVWconst [c]) a) && int32(c) == -1 -> (ADD a x)
+(MULS _ (MOVWconst [0]) a) -> a
+(MULS x (MOVWconst [1]) a) -> (RSB x a)
+(MULS x (MOVWconst [c]) a) && isPowerOfTwo(c) -> (RSB (SLLconst <x.Type> [log2(c)] x) a)
+(MULS x (MOVWconst [c]) a) && isPowerOfTwo(c-1) && int32(c) >= 3 -> (RSB (ADDshiftLL <x.Type> x x [log2(c-1)]) a)
+(MULS x (MOVWconst [c]) a) && isPowerOfTwo(c+1) && int32(c) >= 7 -> (RSB (RSBshiftLL <x.Type> x x [log2(c+1)]) a)
+(MULS x (MOVWconst [c]) a) && c%3 == 0 && isPowerOfTwo(c/3) && is32Bit(c) -> (RSB (SLLconst <x.Type> [log2(c/3)] (ADDshiftLL <x.Type> x x [1])) a)
+(MULS x (MOVWconst [c]) a) && c%5 == 0 && isPowerOfTwo(c/5) && is32Bit(c) -> (RSB (SLLconst <x.Type> [log2(c/5)] (ADDshiftLL <x.Type> x x [2])) a)
+(MULS x (MOVWconst [c]) a) && c%7 == 0 && isPowerOfTwo(c/7) && is32Bit(c) -> (RSB (SLLconst <x.Type> [log2(c/7)] (RSBshiftLL <x.Type> x x [3])) a)
+(MULS x (MOVWconst [c]) a) && c%9 == 0 && isPowerOfTwo(c/9) && is32Bit(c) -> (RSB (SLLconst <x.Type> [log2(c/9)] (ADDshiftLL <x.Type> x x [3])) a)
+
+(MULS (MOVWconst [c]) x a) && int32(c) == -1 -> (ADD a x)
+(MULS (MOVWconst [0]) _ a) -> a
+(MULS (MOVWconst [1]) x a) -> (RSB x a)
+(MULS (MOVWconst [c]) x a) && isPowerOfTwo(c) -> (RSB (SLLconst <x.Type> [log2(c)] x) a)
+(MULS (MOVWconst [c]) x a) && isPowerOfTwo(c-1) && int32(c) >= 3 -> (RSB (ADDshiftLL <x.Type> x x [log2(c-1)]) a)
+(MULS (MOVWconst [c]) x a) && isPowerOfTwo(c+1) && int32(c) >= 7 -> (RSB (RSBshiftLL <x.Type> x x [log2(c+1)]) a)
+(MULS (MOVWconst [c]) x a) && c%3 == 0 && isPowerOfTwo(c/3) && is32Bit(c) -> (RSB (SLLconst <x.Type> [log2(c/3)] (ADDshiftLL <x.Type> x x [1])) a)
+(MULS (MOVWconst [c]) x a) && c%5 == 0 && isPowerOfTwo(c/5) && is32Bit(c) -> (RSB (SLLconst <x.Type> [log2(c/5)] (ADDshiftLL <x.Type> x x [2])) a)
+(MULS (MOVWconst [c]) x a) && c%7 == 0 && isPowerOfTwo(c/7) && is32Bit(c) -> (RSB (SLLconst <x.Type> [log2(c/7)] (RSBshiftLL <x.Type> x x [3])) a)
+(MULS (MOVWconst [c]) x a) && c%9 == 0 && isPowerOfTwo(c/9) && is32Bit(c) -> (RSB (SLLconst <x.Type> [log2(c/9)] (ADDshiftLL <x.Type> x x [3])) a)
 
 // div by constant
 (Select0 (CALLudiv x (MOVWconst [1]))) -> x
@@ -1151,13 +1178,31 @@
 (MOVWstore [0] {sym} (ADDshiftLL ptr idx [c]) val mem) && sym == nil && !config.nacl -> (MOVWstoreshiftLL ptr idx [c] val mem)
 (MOVWstore [0] {sym} (ADDshiftRL ptr idx [c]) val mem) && sym == nil && !config.nacl -> (MOVWstoreshiftRL ptr idx [c] val mem)
 (MOVWstore [0] {sym} (ADDshiftRA ptr idx [c]) val mem) && sym == nil && !config.nacl -> (MOVWstoreshiftRA ptr idx [c] val mem)
+(MOVBUload [0] {sym} (ADD ptr idx) mem) && sym == nil && !config.nacl -> (MOVBUloadidx ptr idx mem)
+(MOVBload [0] {sym} (ADD ptr idx) mem) && sym == nil && !config.nacl -> (MOVBloadidx ptr idx mem)
+(MOVBstore [0] {sym} (ADD ptr idx) val mem) && sym == nil && !config.nacl -> (MOVBstoreidx ptr idx val mem)
+(MOVHUload [0] {sym} (ADD ptr idx) mem) && sym == nil && !config.nacl -> (MOVHUloadidx ptr idx mem)
+(MOVHload [0] {sym} (ADD ptr idx) mem) && sym == nil && !config.nacl -> (MOVHloadidx ptr idx mem)
+(MOVHstore [0] {sym} (ADD ptr idx) val mem) && sym == nil && !config.nacl -> (MOVHstoreidx ptr idx val mem)
 
 // constant folding in indexed loads and stores
 (MOVWloadidx ptr (MOVWconst [c]) mem) -> (MOVWload [c] ptr mem)
 (MOVWloadidx (MOVWconst [c]) ptr mem) -> (MOVWload [c] ptr mem)
+(MOVBloadidx ptr (MOVWconst [c]) mem) -> (MOVBload [c] ptr mem)
+(MOVBloadidx (MOVWconst [c]) ptr mem) -> (MOVBload [c] ptr mem)
+(MOVBUloadidx ptr (MOVWconst [c]) mem) -> (MOVBUload [c] ptr mem)
+(MOVBUloadidx (MOVWconst [c]) ptr mem) -> (MOVBUload [c] ptr mem)
+(MOVHUloadidx ptr (MOVWconst [c]) mem) -> (MOVHUload [c] ptr mem)
+(MOVHUloadidx (MOVWconst [c]) ptr mem) -> (MOVHUload [c] ptr mem)
+(MOVHloadidx ptr (MOVWconst [c]) mem) -> (MOVHload [c] ptr mem)
+(MOVHloadidx (MOVWconst [c]) ptr mem) -> (MOVHload [c] ptr mem)
 
 (MOVWstoreidx ptr (MOVWconst [c]) val mem) -> (MOVWstore [c] ptr val mem)
 (MOVWstoreidx (MOVWconst [c]) ptr val mem) -> (MOVWstore [c] ptr val mem)
+(MOVBstoreidx ptr (MOVWconst [c]) val mem) -> (MOVBstore [c] ptr val mem)
+(MOVBstoreidx (MOVWconst [c]) ptr val mem) -> (MOVBstore [c] ptr val mem)
+(MOVHstoreidx ptr (MOVWconst [c]) val mem) -> (MOVHstore [c] ptr val mem)
+(MOVHstoreidx (MOVWconst [c]) ptr val mem) -> (MOVHstore [c] ptr val mem)
 
 (MOVWloadidx ptr (SLLconst idx [c]) mem) -> (MOVWloadshiftLL ptr idx [c] mem)
 (MOVWloadidx (SLLconst idx [c]) ptr mem) -> (MOVWloadshiftLL ptr idx [c] mem)
@@ -1192,6 +1237,8 @@
 (BIC x x) -> (MOVWconst [0])
 
 (ADD (MUL x y) a) -> (MULA x y a)
+(SUB a (MUL x y)) && objabi.GOARM == 7 -> (MULS x y a)
+(RSB (MUL x y) a) && objabi.GOARM == 7 -> (MULS x y a)
 
 (AND x (MVN y)) -> (BIC x y)
 

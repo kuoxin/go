@@ -59,7 +59,7 @@ followed by detailed output for each failed package.
 the file pattern "*_test.go".
 Files whose names begin with "_" (including "_test.go") or "." are ignored.
 These additional files can contain test functions, benchmark functions, and
-example functions.  See 'go help testfunc' for more.
+example functions. See 'go help testfunc' for more.
 Each listed package causes the execution of a separate test binary.
 
 Test files that declare a package with the suffix "_test" will be compiled as a
@@ -68,7 +68,7 @@ separate package, and then linked and run with the main test binary.
 The go tool will ignore a directory named "testdata", making it available
 to hold ancillary data needed by the tests.
 
-By default, go test needs no arguments.  It compiles and tests the package
+By default, go test needs no arguments. It compiles and tests the package
 with source in the current directory, including tests, and runs the tests.
 
 The package is built in a temporary directory so it does not interfere with the
@@ -130,7 +130,7 @@ and flags that apply to the resulting test binary.
 
 Several of the flags control profiling and write an execution profile
 suitable for "go tool pprof"; run "go tool pprof -h" for more
-information.  The --alloc_space, --alloc_objects, and --show_bytes
+information. The --alloc_space, --alloc_objects, and --show_bytes
 options of pprof control how the information is presented.
 
 The following flags are recognized by the 'go test' command and
@@ -142,12 +142,17 @@ control the execution of any test:
 
 const testFlag2 = `
 	-bench regexp
-	    Run (sub)benchmarks matching a regular expression.
-	    The given regular expression is split into smaller ones by
-	    top-level '/', where each must match the corresponding part of a
-	    benchmark's identifier.
-	    By default, no benchmarks run. To run all benchmarks,
-	    use '-bench .' or '-bench=.'.
+	    Run only those benchmarks matching a regular expression.
+	    By default, no benchmarks are run. 
+	    To run all benchmarks, use '-bench .' or '-bench=.'.
+	    The regular expression is split by unbracketed slash (/)
+	    characters into a sequence of regular expressions, and each
+	    part of a benchmark's identifier must match the corresponding
+	    element in the sequence, if any. Possible parents of matches
+	    are run with b.N=1 to identify sub-benchmarks. For example,
+	    given -bench=X/Y, top-level benchmarks matching X are run
+	    with b.N=1 to find any sub-benchmarks matching Y, which are
+	    then run in full.
 
 	-benchtime t
 	    Run enough iterations of each benchmark to take t, specified
@@ -161,6 +166,10 @@ const testFlag2 = `
 
 	-cover
 	    Enable coverage analysis.
+	    Note that because coverage works by annotating the source
+	    code before compilation, compilation and test failures with
+	    coverage enabled may report line numbers that don't correspond
+	    to the original sources.
 
 	-covermode set,count,atomic
 	    Set the mode for coverage analysis for the package[s]
@@ -181,7 +190,7 @@ const testFlag2 = `
 
 	-cpu 1,2,4
 	    Specify a list of GOMAXPROCS values for which the tests or
-	    benchmarks should be executed.  The default is the current value
+	    benchmarks should be executed. The default is the current value
 	    of GOMAXPROCS.
 
 	-list regexp
@@ -200,9 +209,13 @@ const testFlag2 = `
 
 	-run regexp
 	    Run only those tests and examples matching the regular expression.
-	    For tests the regular expression is split into smaller ones by
-	    top-level '/', where each must match the corresponding part of a
-	    test's identifier.
+	    For tests, the regular expression is split by unbracketed slash (/)
+	    characters into a sequence of regular expressions, and each part
+	    of a test's identifier must match the corresponding element in
+	    the sequence, if any. Note that possible parents of matches are
+	    run too, so that -run=X/Y matches and runs and reports the result
+	    of all tests matching X, even those without sub-tests matching Y,
+	    because it must run them to look for those sub-tests.
 
 	-short
 	    Tell long-running tests to shorten their run time.
@@ -210,8 +223,8 @@ const testFlag2 = `
 	    the Go tree can run a sanity check but not spend time running
 	    exhaustive tests.
 
-	-timeout t
-	    If a test runs longer than t, panic.
+	-timeout d
+	    If a test binary runs longer than duration d, panic.
 	    The default is 10 minutes (10m).
 
 	-v
@@ -234,7 +247,7 @@ profile the tests during execution:
 	    calling runtime.SetBlockProfileRate with n.
 	    See 'go doc runtime.SetBlockProfileRate'.
 	    The profiler aims to sample, on average, one blocking event every
-	    n nanoseconds the program spends blocked.  By default,
+	    n nanoseconds the program spends blocked. By default,
 	    if -test.blockprofile is set without this flag, all blocking events
 	    are recorded, equivalent to -test.blockprofilerate=1.
 
@@ -252,7 +265,7 @@ profile the tests during execution:
 
 	-memprofilerate n
 	    Enable more precise (and expensive) memory profiles by setting
-	    runtime.MemProfileRate.  See 'go doc runtime.MemProfileRate'.
+	    runtime.MemProfileRate. See 'go doc runtime.MemProfileRate'.
 	    To profile all memory allocations, use -test.memprofilerate=1
 	    and pass --alloc_space flag to the pprof tool.
 
@@ -357,8 +370,8 @@ comment is compiled but not executed. An example with no text after
 "Output:" is compiled, executed, and expected to produce no output.
 
 Godoc displays the body of ExampleXXX to demonstrate the use
-of the function, constant, or variable XXX.  An example of a method M with
-receiver type T or *T is named ExampleT_M.  There may be multiple examples
+of the function, constant, or variable XXX. An example of a method M with
+receiver type T or *T is named ExampleT_M. There may be multiple examples
 for a given function, constant, or variable, distinguished by a trailing _xxx,
 where xxx is a suffix not beginning with an upper case letter.
 
@@ -412,11 +425,11 @@ var (
 	testKillTimeout = 10 * time.Minute
 )
 
-var testMainDeps = map[string]bool{
+var testMainDeps = []string{
 	// Dependencies for testmain.
-	"testing":                   true,
-	"testing/internal/testdeps": true,
-	"os": true,
+	"os",
+	"testing",
+	"testing/internal/testdeps",
 }
 
 func runTest(cmd *base.Command, args []string) {
@@ -477,7 +490,7 @@ func runTest(cmd *base.Command, args []string) {
 		cfg.BuildV = testV
 
 		deps := make(map[string]bool)
-		for dep := range testMainDeps {
+		for _, dep := range testMainDeps {
 			deps[dep] = true
 		}
 
@@ -663,7 +676,7 @@ func runTest(cmd *base.Command, args []string) {
 
 // ensures that package p imports the named package
 func ensureImport(p *load.Package, pkg string) {
-	for _, d := range p.Internal.Deps {
+	for _, d := range p.Internal.Imports {
 		if d.Name == pkg {
 			return
 		}
@@ -874,7 +887,7 @@ func builderTest(b *work.Builder, p *load.Package) (buildAction, runAction, prin
 
 	// The generated main also imports testing, regexp, and os.
 	stk.Push("testmain")
-	for dep := range testMainDeps {
+	for _, dep := range testMainDeps {
 		if dep == ptest.ImportPath {
 			pmain.Internal.Imports = append(pmain.Internal.Imports, ptest)
 		} else {
@@ -1094,13 +1107,7 @@ func recompileForTest(pmain, preal, ptest *load.Package, testDir string) {
 			}
 		}
 
-		// Update p.Deps and p.Internal.Imports to use at test copies.
-		for i, dep := range p.Internal.Deps {
-			if p1 := testCopy[dep]; p1 != nil && p1 != dep {
-				split()
-				p.Internal.Deps[i] = p1
-			}
-		}
+		// Update p.Internal.Imports to use test copies.
 		for i, imp := range p.Internal.Imports {
 			if p1 := testCopy[imp]; p1 != nil && p1 != imp {
 				split()

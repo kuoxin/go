@@ -272,11 +272,14 @@ type sudog struct {
 	// channel this sudog is blocking on. shrinkstack depends on
 	// this for sudogs involved in channel ops.
 
-	g          *g
-	selectdone *uint32 // CAS to 1 to win select race (may point to stack)
-	next       *sudog
-	prev       *sudog
-	elem       unsafe.Pointer // data element (may point to stack)
+	g *g
+
+	// isSelect indicates g is participating in a select, so
+	// g.selectDone must be CAS'd to win the wake-up race.
+	isSelect bool
+	next     *sudog
+	prev     *sudog
+	elem     unsafe.Pointer // data element (may point to stack)
 
 	// The following fields are never accessed concurrently.
 	// For channels, waitlink is only accessed by g.
@@ -367,6 +370,7 @@ type g struct {
 	cgoCtxt        []uintptr      // cgo traceback context
 	labels         unsafe.Pointer // profiler labels
 	timer          *timer         // cached timer for time.Sleep
+	selectDone     uint32         // are we participating in a select and did someone win the race?
 
 	// Per-G GC state
 
@@ -453,9 +457,10 @@ type p struct {
 	id          int32
 	status      uint32 // one of pidle/prunning/...
 	link        puintptr
-	schedtick   uint32   // incremented on every scheduler call
-	syscalltick uint32   // incremented on every system call
-	m           muintptr // back-link to associated m (nil if idle)
+	schedtick   uint32     // incremented on every scheduler call
+	syscalltick uint32     // incremented on every system call
+	sysmontick  sysmontick // last tick observed by sysmon
+	m           muintptr   // back-link to associated m (nil if idle)
 	mcache      *mcache
 	racectx     uintptr
 
@@ -518,7 +523,7 @@ type p struct {
 const (
 	// The max value of GOMAXPROCS.
 	// There are no fundamental restrictions on the value.
-	_MaxGomaxprocs = 1 << 8
+	_MaxGomaxprocs = 1 << 10
 )
 
 type schedt struct {
@@ -589,6 +594,7 @@ const (
 	_LockInternal = 2
 )
 
+// Values for the flags field of a sigTabT.
 const (
 	_SigNotify   = 1 << iota // let signal.Notify have signal, even if from kernel
 	_SigKill                 // if signal.Notify doesn't take it, exit quietly
@@ -598,6 +604,7 @@ const (
 	_SigGoExit               // cause all runtime procs to exit (only used on Plan 9).
 	_SigSetStack             // add SA_ONSTACK to libc handler
 	_SigUnblock              // unblocked in minit
+	_SigIgn                  // _SIG_DFL action is to ignore the signal
 )
 
 // Layout of in-memory per-function information prepared by linker
@@ -623,14 +630,11 @@ type _func struct {
 // Needs to be in sync with
 // ../cmd/compile/internal/gc/reflect.go:/^func.dumptypestructs.
 type itab struct {
-	inter  *interfacetype
-	_type  *_type
-	link   *itab
-	hash   uint32 // copy of _type.hash. Used for type switches.
-	bad    bool   // type does not implement interface
-	inhash bool   // has this itab been added to hash?
-	unused [2]byte
-	fun    [1]uintptr // variable sized
+	inter *interfacetype
+	_type *_type
+	hash  uint32 // copy of _type.hash. Used for type switches.
+	_     [4]byte
+	fun   [1]uintptr // variable sized. fun[0]==0 means _type does not implement inter.
 }
 
 // Lock-free stack node.
@@ -715,16 +719,14 @@ const (
 const _TracebackMaxFrames = 100
 
 var (
-	emptystring string
-	allglen     uintptr
-	allm        *m
-	allp        [_MaxGomaxprocs + 1]*p
-	gomaxprocs  int32
-	panicking   uint32
-	ncpu        int32
-	forcegc     forcegcstate
-	sched       schedt
-	newprocs    int32
+	allglen    uintptr
+	allm       *m
+	allp       [_MaxGomaxprocs + 1]*p
+	gomaxprocs int32
+	ncpu       int32
+	forcegc    forcegcstate
+	sched      schedt
+	newprocs   int32
 
 	// Information about what cpu features are available.
 	// Set on startup in asm_{386,amd64,amd64p32}.s.

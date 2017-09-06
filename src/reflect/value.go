@@ -180,12 +180,11 @@ type emptyInterface struct {
 type nonEmptyInterface struct {
 	// see ../runtime/iface.go:/Itab
 	itab *struct {
-		ityp   *rtype // static interface type
-		typ    *rtype // dynamic concrete type
-		link   unsafe.Pointer
-		bad    int32
-		unused int32
-		fun    [100000]unsafe.Pointer // method table
+		ityp *rtype // static interface type
+		typ  *rtype // dynamic concrete type
+		hash uint32 // copy of typ.hash
+		_    [4]byte
+		fun  [100000]unsafe.Pointer // method table
 	}
 	word unsafe.Pointer
 }
@@ -1134,7 +1133,7 @@ func (v Value) Method(i int) Value {
 	return Value{v.typ, v.ptr, fl}
 }
 
-// NumMethod returns the number of methods in the value's method set.
+// NumMethod returns the number of exported methods in the value's method set.
 func (v Value) NumMethod() int {
 	if v.typ == nil {
 		panic(&ValueError{"reflect.Value.NumMethod", Invalid})
@@ -2073,7 +2072,7 @@ func MakeChan(typ Type, buffer int) Value {
 	if typ.ChanDir() != BothDir {
 		panic("reflect.MakeChan: unidirectional channel type")
 	}
-	ch := makechan(typ.(*rtype), uint64(buffer))
+	ch := makechan(typ.(*rtype), buffer)
 	return Value{typ.common(), ch, flag(Chan)}
 }
 
@@ -2082,12 +2081,13 @@ func MakeMap(typ Type) Value {
 	return MakeMapWithSize(typ, 0)
 }
 
-// MakeMapWithSize creates a new map with the specified type and initial capacity.
-func MakeMapWithSize(typ Type, cap int) Value {
+// MakeMapWithSize creates a new map with the specified type
+// and initial space for approximately n elements.
+func MakeMapWithSize(typ Type, n int) Value {
 	if typ.Kind() != Map {
 		panic("reflect.MakeMapWithSize of non-map type")
 	}
-	m := makemap(typ.(*rtype), cap)
+	m := makemap(typ.(*rtype), n)
 	return Value{typ.common(), m, flag(Map)}
 }
 
@@ -2480,7 +2480,7 @@ func chanrecv(ch unsafe.Pointer, nb bool, val unsafe.Pointer) (selected, receive
 //go:noescape
 func chansend(ch unsafe.Pointer, val unsafe.Pointer, nb bool) bool
 
-func makechan(typ *rtype, size uint64) (ch unsafe.Pointer)
+func makechan(typ *rtype, size int) (ch unsafe.Pointer)
 func makemap(t *rtype, cap int) (m unsafe.Pointer)
 
 //go:noescape

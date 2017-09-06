@@ -7,10 +7,13 @@
 package cfg
 
 import (
+	"fmt"
 	"go/build"
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"cmd/internal/objabi"
 )
 
 // These are general "build flags" used by build and other commands.
@@ -57,11 +60,17 @@ var CmdEnv []EnvVar
 
 // Global build parameters (used during package load)
 var (
-	Goarch    string
-	Goos      string
+	Goarch    = BuildContext.GOARCH
+	Goos      = BuildContext.GOOS
 	ExeSuffix string
-	Gopath    []string
+	Gopath    = filepath.SplitList(BuildContext.GOPATH)
 )
+
+func init() {
+	if Goos == "windows" {
+		ExeSuffix = ".exe"
+	}
+}
 
 var (
 	GOROOT    = findGOROOT()
@@ -69,7 +78,21 @@ var (
 	GOROOTbin = filepath.Join(GOROOT, "bin")
 	GOROOTpkg = filepath.Join(GOROOT, "pkg")
 	GOROOTsrc = filepath.Join(GOROOT, "src")
+
+	// Used in envcmd.MkEnv and build ID computations.
+	GOARM = fmt.Sprint(objabi.GOARM)
+	GO386 = objabi.GO386
 )
+
+// Update build context to use our computed GOROOT.
+func init() {
+	BuildContext.GOROOT = GOROOT
+	// Note that we must use runtime.GOOS and runtime.GOARCH here,
+	// as the tool directory does not move based on environment variables.
+	// This matches the initialization of ToolDir in go/build,
+	// except for using GOROOT rather than runtime.GOROOT().
+	build.ToolDir = filepath.Join(GOROOT, "pkg/tool/"+runtime.GOOS+"_"+runtime.GOARCH)
+}
 
 func findGOROOT() string {
 	if env := os.Getenv("GOROOT"); env != "" {

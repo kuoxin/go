@@ -87,6 +87,9 @@ func PrintfTests() {
 	fmt.Printf("%s", &stringerv)
 	fmt.Printf("%v", &stringerv)
 	fmt.Printf("%T", &stringerv)
+	fmt.Printf("%s", &embeddedStringerv)
+	fmt.Printf("%v", &embeddedStringerv)
+	fmt.Printf("%T", &embeddedStringerv)
 	fmt.Printf("%v", notstringerv)
 	fmt.Printf("%T", notstringerv)
 	fmt.Printf("%q", stringerarrayv)
@@ -123,6 +126,8 @@ func PrintfTests() {
 	fmt.Printf("%X", 2.3)                      // ERROR "arg 2.3 for printf verb %X of wrong type"
 	fmt.Printf("%s", stringerv)                // ERROR "arg stringerv for printf verb %s of wrong type"
 	fmt.Printf("%t", stringerv)                // ERROR "arg stringerv for printf verb %t of wrong type"
+	fmt.Printf("%s", embeddedStringerv)        // ERROR "arg embeddedStringerv for printf verb %s of wrong type"
+	fmt.Printf("%t", embeddedStringerv)        // ERROR "arg embeddedStringerv for printf verb %t of wrong type"
 	fmt.Printf("%q", notstringerv)             // ERROR "arg notstringerv for printf verb %q of wrong type"
 	fmt.Printf("%t", notstringerv)             // ERROR "arg notstringerv for printf verb %t of wrong type"
 	fmt.Printf("%t", stringerarrayv)           // ERROR "arg stringerarrayv for printf verb %t of wrong type"
@@ -346,6 +351,14 @@ func (*stringer) Warnf(int, string, ...interface{}) string {
 	return "warnf"
 }
 
+type embeddedStringer struct {
+	foo string
+	stringer
+	bar int
+}
+
+var embeddedStringerv embeddedStringer
+
 type notstringer struct {
 	f float64
 }
@@ -390,7 +403,7 @@ var notPercentDV notPercentDStruct
 type percentSStruct struct {
 	a string
 	b []byte
-	c stringerarray
+	C stringerarray
 }
 
 var percentSV percentSStruct
@@ -458,4 +471,55 @@ func (s *unknownStruct) Fprintln(w io.Writer, s string) {}
 func UnknownStructFprintln() {
 	s := unknownStruct{}
 	s.Fprintln(os.Stdout, "hello, world!") // OK
+}
+
+// Issue 17798: unexported stringer cannot be formatted.
+type unexportedStringer struct {
+	t stringer
+}
+type unexportedStringerOtherFields struct {
+	s string
+	t stringer
+	S string
+}
+
+// Issue 17798: unexported error cannot be formatted.
+type unexportedError struct {
+	e error
+}
+type unexportedErrorOtherFields struct {
+	s string
+	e error
+	S string
+}
+
+type errorer struct{}
+
+func (e errorer) Error() string { return "errorer" }
+
+func UnexportedStringerOrError() {
+	us := unexportedStringer{}
+	fmt.Printf("%s", us)  // ERROR "arg us for printf verb %s of wrong type"
+	fmt.Printf("%s", &us) // ERROR "arg &us for printf verb %s of wrong type"
+
+	usf := unexportedStringerOtherFields{
+		s: "foo",
+		S: "bar",
+	}
+	fmt.Printf("%s", usf)  // ERROR "arg usf for printf verb %s of wrong type"
+	fmt.Printf("%s", &usf) // ERROR "arg &usf for printf verb %s of wrong type"
+
+	ue := unexportedError{
+		e: &errorer{},
+	}
+	fmt.Printf("%s", ue)  // ERROR "arg ue for printf verb %s of wrong type"
+	fmt.Printf("%s", &ue) // ERROR "arg &ue for printf verb %s of wrong type"
+
+	uef := unexportedErrorOtherFields{
+		s: "foo",
+		e: &errorer{},
+		S: "bar",
+	}
+	fmt.Printf("%s", uef)  // ERROR "arg uef for printf verb %s of wrong type"
+	fmt.Printf("%s", &uef) // ERROR "arg &uef for printf verb %s of wrong type"
 }

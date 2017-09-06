@@ -321,6 +321,89 @@ func TestSetValue(t *testing.T) {
 	}
 }
 
+func TestCanSetField(t *testing.T) {
+	type embed struct{ x, X int }
+	type Embed struct{ x, X int }
+	type S1 struct {
+		embed
+		x, X int
+	}
+	type S2 struct {
+		*embed
+		x, X int
+	}
+	type S3 struct {
+		Embed
+		x, X int
+	}
+	type S4 struct {
+		*Embed
+		x, X int
+	}
+
+	type testCase struct {
+		index  []int
+		canSet bool
+	}
+	tests := []struct {
+		val   Value
+		cases []testCase
+	}{{
+		val: ValueOf(&S1{}),
+		cases: []testCase{
+			{[]int{0}, false},
+			{[]int{0, 0}, false},
+			{[]int{0, 1}, true},
+			{[]int{1}, false},
+			{[]int{2}, true},
+		},
+	}, {
+		val: ValueOf(&S2{embed: &embed{}}),
+		cases: []testCase{
+			{[]int{0}, false},
+			{[]int{0, 0}, false},
+			{[]int{0, 1}, true},
+			{[]int{1}, false},
+			{[]int{2}, true},
+		},
+	}, {
+		val: ValueOf(&S3{}),
+		cases: []testCase{
+			{[]int{0}, true},
+			{[]int{0, 0}, false},
+			{[]int{0, 1}, true},
+			{[]int{1}, false},
+			{[]int{2}, true},
+		},
+	}, {
+		val: ValueOf(&S4{Embed: &Embed{}}),
+		cases: []testCase{
+			{[]int{0}, true},
+			{[]int{0, 0}, false},
+			{[]int{0, 1}, true},
+			{[]int{1}, false},
+			{[]int{2}, true},
+		},
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.val.Type().Name(), func(t *testing.T) {
+			for _, tc := range tt.cases {
+				f := tt.val
+				for _, i := range tc.index {
+					if f.Kind() == Ptr {
+						f = f.Elem()
+					}
+					f = f.Field(i)
+				}
+				if got := f.CanSet(); got != tc.canSet {
+					t.Errorf("CanSet() = %v, want %v", got, tc.canSet)
+				}
+			}
+		})
+	}
+}
+
 var _i = 7
 
 var valueToStringTests = []pair{
@@ -2357,10 +2440,13 @@ func TestImportPath(t *testing.T) {
 }
 
 func TestFieldPkgPath(t *testing.T) {
+	type x int
 	typ := TypeOf(struct {
 		Exported   string
 		unexported string
 		OtherPkgFields
+		int // issue 21702
+		*x  // issue 21122
 	}{})
 
 	type pkgpathTest struct {
@@ -2387,6 +2473,8 @@ func TestFieldPkgPath(t *testing.T) {
 		{[]int{2}, "", true},              // OtherPkgFields
 		{[]int{2, 0}, "", false},          // OtherExported
 		{[]int{2, 1}, "reflect", false},   // otherUnexported
+		{[]int{3}, "reflect_test", true},  // int
+		{[]int{4}, "reflect_test", true},  // *x
 	})
 
 	type localOtherPkgFields OtherPkgFields
@@ -4063,6 +4151,54 @@ func TestSliceOfGC(t *testing.T) {
 	}
 }
 
+func TestStructOfFieldName(t *testing.T) {
+	// invalid field name "1nvalid"
+	shouldPanic(func() {
+		StructOf([]StructField{
+			StructField{Name: "valid", Type: TypeOf("")},
+			StructField{Name: "1nvalid", Type: TypeOf("")},
+		})
+	})
+
+	// invalid field name "+"
+	shouldPanic(func() {
+		StructOf([]StructField{
+			StructField{Name: "val1d", Type: TypeOf("")},
+			StructField{Name: "+", Type: TypeOf("")},
+		})
+	})
+
+	// no field name
+	shouldPanic(func() {
+		StructOf([]StructField{
+			StructField{Name: "", Type: TypeOf("")},
+		})
+	})
+
+	// verify creation of a struct with valid struct fields
+	validFields := []StructField{
+		StructField{
+			Name: "φ",
+			Type: TypeOf(""),
+		},
+		StructField{
+			Name: "ValidName",
+			Type: TypeOf(""),
+		},
+		StructField{
+			Name: "Val1dNam5",
+			Type: TypeOf(""),
+		},
+	}
+
+	validStruct := StructOf(validFields)
+
+	const structStr = `struct { φ string; ValidName string; Val1dNam5 string }`
+	if got, want := validStruct.String(), structStr; got != want {
+		t.Errorf("StructOf(validFields).String()=%q, want %q", got, want)
+	}
+}
+
 func TestStructOf(t *testing.T) {
 	// check construction and use of type not in binary
 	fields := []StructField{
@@ -4638,41 +4774,67 @@ func TestStructOfWithInterface(t *testing.T) {
 	}
 
 	for i, table := range tests {
-		rt := StructOf(
-			[]StructField{
-				{
-					Name:      table.name,
-					Anonymous: true,
-					PkgPath:   "",
-					Type:      table.typ,
-				},
-			},
-		)
-		rv := New(rt).Elem()
-		rv.Field(0).Set(table.val)
-
-		if _, ok := rv.Interface().(Iface); ok != table.impl {
-			if table.impl {
-				t.Errorf("test-%d: type=%v fails to implement Iface.\n", i, table.typ)
-			} else {
-				t.Errorf("test-%d: type=%v should NOT implement Iface\n", i, table.typ)
+		for j := 0; j < 2; j++ {
+			var fields []StructField
+			if j == 1 {
+				fields = append(fields, StructField{
+					Name:    "Dummy",
+					PkgPath: "",
+					Type:    TypeOf(int(0)),
+				})
 			}
-			continue
-		}
+			fields = append(fields, StructField{
+				Name:      table.name,
+				Anonymous: true,
+				PkgPath:   "",
+				Type:      table.typ,
+			})
 
-		if !table.impl {
-			continue
-		}
+			// We currently do not correctly implement methods
+			// for anonymous fields other than the first.
+			// Therefore, for now, we expect those methods
+			// to not exist.  See issues 15924 and 20824.
+			// When those issues are fixed, this test of panic
+			// should be removed.
+			if j == 1 && table.impl {
+				func() {
+					defer func() {
+						if err := recover(); err == nil {
+							t.Errorf("test-%d-%d did not panic", i, j)
+						}
+					}()
+					_ = StructOf(fields)
+				}()
+				continue
+			}
 
-		v := rv.Interface().(Iface).Get()
-		if v != want {
-			t.Errorf("test-%d: x.Get()=%v. want=%v\n", i, v, want)
-		}
+			rt := StructOf(fields)
+			rv := New(rt).Elem()
+			rv.Field(j).Set(table.val)
 
-		fct := rv.MethodByName("Get")
-		out := fct.Call(nil)
-		if !DeepEqual(out[0].Interface(), want) {
-			t.Errorf("test-%d: x.Get()=%v. want=%v\n", i, out[0].Interface(), want)
+			if _, ok := rv.Interface().(Iface); ok != table.impl {
+				if table.impl {
+					t.Errorf("test-%d-%d: type=%v fails to implement Iface.\n", i, j, table.typ)
+				} else {
+					t.Errorf("test-%d-%d: type=%v should NOT implement Iface\n", i, j, table.typ)
+				}
+				continue
+			}
+
+			if !table.impl {
+				continue
+			}
+
+			v := rv.Interface().(Iface).Get()
+			if v != want {
+				t.Errorf("test-%d-%d: x.Get()=%v. want=%v\n", i, j, v, want)
+			}
+
+			fct := rv.MethodByName("Get")
+			out := fct.Call(nil)
+			if !DeepEqual(out[0].Interface(), want) {
+				t.Errorf("test-%d-%d: x.Get()=%v. want=%v\n", i, j, out[0].Interface(), want)
+			}
 		}
 	}
 }
@@ -5445,6 +5607,25 @@ func TestKeepFuncLive(t *testing.T) {
 		return nil
 	}
 	MakeFunc(typ, f).Call([]Value{ValueOf(10)})
+}
+
+type UnExportedFirst int
+
+func (i UnExportedFirst) ΦExported()  {}
+func (i UnExportedFirst) unexported() {}
+
+// Issue 21177
+func TestMethodByNameUnExportedFirst(t *testing.T) {
+	defer func() {
+		if recover() != nil {
+			t.Errorf("should not panic")
+		}
+	}()
+	typ := TypeOf(UnExportedFirst(0))
+	m, _ := typ.MethodByName("ΦExported")
+	if m.Name != "ΦExported" {
+		t.Errorf("got %s, expected ΦExported", m.Name)
+	}
 }
 
 // Issue 18635 (method version).

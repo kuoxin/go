@@ -98,14 +98,14 @@ type Arch struct {
 	Solarisdynld     string
 	Adddynrel        func(*Link, *Symbol, *Reloc) bool
 	Archinit         func(*Link)
-	Archreloc        func(*Link, *Reloc, *Symbol, *int64) int
+	Archreloc        func(*Link, *Reloc, *Symbol, *int64) bool
 	Archrelocvariant func(*Link, *Reloc, *Symbol, int64) int64
 	Trampoline       func(*Link, *Reloc, *Symbol)
 	Asmb             func(*Link)
-	Elfreloc1        func(*Link, *Reloc, int64) int
+	Elfreloc1        func(*Link, *Reloc, int64) bool
 	Elfsetupplt      func(*Link)
 	Gentext          func(*Link)
-	Machoreloc1      func(*Symbol, *Reloc, int64) int
+	Machoreloc1      func(*Symbol, *Reloc, int64) bool
 	PEreloc1         func(*Symbol, *Reloc, int64) bool
 	Wput             func(uint16)
 	Lput             func(uint32)
@@ -242,7 +242,7 @@ func (w *outBuf) Offset() int64 {
 
 var coutbuf outBuf
 
-const pkgname = "__.PKGDEF"
+const pkgdef = "__.PKGDEF"
 
 var (
 	// Set if we see an object compiled by the host compiler that is not
@@ -333,6 +333,19 @@ func errorexit() {
 }
 
 func loadinternal(ctxt *Link, name string) *Library {
+	if *FlagLinkshared && ctxt.PackageShlib != nil {
+		if shlibname := ctxt.PackageShlib[name]; shlibname != "" {
+			return addlibpath(ctxt, "internal", "internal", "", name, shlibname)
+		}
+	}
+	if ctxt.PackageFile != nil {
+		if pname := ctxt.PackageFile[name]; pname != "" {
+			return addlibpath(ctxt, "internal", "internal", pname, name, "")
+		}
+		ctxt.Logf("loadinternal: cannot find %s\n", name)
+		return nil
+	}
+
 	for i := 0; i < len(ctxt.Libdir); i++ {
 		if *FlagLinkshared {
 			shlibname := filepath.Join(ctxt.Libdir[i], name+".shlibname")
@@ -408,7 +421,6 @@ func (ctxt *Link) loadlib() {
 
 	var i int
 	for i = 0; i < len(ctxt.Library); i++ {
-		iscgo = iscgo || ctxt.Library[i].Pkg == "runtime/cgo"
 		if ctxt.Library[i].Shlib == "" {
 			if ctxt.Debugvlog > 1 {
 				ctxt.Logf("%5.2f autolib: %s (from %s)\n", Cputime(), ctxt.Library[i].File, ctxt.Library[i].Objref)
@@ -425,6 +437,8 @@ func (ctxt *Link) loadlib() {
 			ldshlibsyms(ctxt, ctxt.Library[i].Shlib)
 		}
 	}
+
+	iscgo = ctxt.Syms.ROLookup("x_cgo_init", 0) != nil
 
 	// We now have enough information to determine the link mode.
 	determineLinkMode(ctxt)
@@ -711,8 +725,17 @@ func genhash(ctxt *Link, lib *Library) {
 	}
 	defer f.Close()
 
+	var magbuf [len(ARMAG)]byte
+	if _, err := io.ReadFull(f, magbuf[:]); err != nil {
+		Exitf("file %s too short", lib.File)
+	}
+
+	if string(magbuf[:]) != ARMAG {
+		Exitf("%s is not an archive file", lib.File)
+	}
+
 	var arhdr ArHdr
-	l := nextar(f, int64(len(ARMAG)), &arhdr)
+	l := nextar(f, f.Offset(), &arhdr)
 	if l <= 0 {
 		Errorf(nil, "%s: short read on archive file symbol header", lib.File)
 		return
@@ -723,7 +746,7 @@ func genhash(ctxt *Link, lib *Library) {
 	// To compute the hash of a package, we hash the first line of
 	// __.PKGDEF (which contains the toolchain version and any
 	// GOEXPERIMENT flags) and the export data (which is between
-	// the first two occurences of "\n$$").
+	// the first two occurrences of "\n$$").
 
 	pkgDefBytes := make([]byte, atolwhex(arhdr.size))
 	_, err = io.ReadFull(f, pkgDefBytes)
@@ -788,7 +811,7 @@ func objfile(ctxt *Link, lib *Library) {
 		goto out
 	}
 
-	if !strings.HasPrefix(arhdr.name, pkgname) {
+	if !strings.HasPrefix(arhdr.name, pkgdef) {
 		Errorf(nil, "%s: cannot find package header", lib.File)
 		goto out
 	}
@@ -1073,7 +1096,8 @@ func (l *Link) hostlink() {
 		argv = append(argv, "-Wl,-headerpad,1144")
 		if l.DynlinkingGo() {
 			argv = append(argv, "-Wl,-flat_namespace")
-		} else if !SysArch.InFamily(sys.ARM64) {
+		}
+		if Buildmode == BuildmodeExe && !SysArch.InFamily(sys.ARM64) {
 			argv = append(argv, "-Wl,-no_pie")
 		}
 	case objabi.Hopenbsd:
@@ -1092,10 +1116,13 @@ func (l *Link) hostlink() {
 			argv = append(argv, "-Wl,-pagezero_size,4000000")
 		}
 	case BuildmodePIE:
-		if UseRelro() {
-			argv = append(argv, "-Wl,-z,relro")
+		// ELF.
+		if Headtype != objabi.Hdarwin {
+			if UseRelro() {
+				argv = append(argv, "-Wl,-z,relro")
+			}
+			argv = append(argv, "-pie")
 		}
-		argv = append(argv, "-pie")
 	case BuildmodeCShared:
 		if Headtype == objabi.Hdarwin {
 			argv = append(argv, "-dynamiclib")
@@ -1239,16 +1266,23 @@ func (l *Link) hostlink() {
 	// toolchain if it is supported.
 	if Buildmode == BuildmodeExe {
 		src := filepath.Join(*flagTmpdir, "trivial.c")
-		if err := ioutil.WriteFile(src, []byte{}, 0666); err != nil {
+		if err := ioutil.WriteFile(src, []byte("int main() { return 0; }"), 0666); err != nil {
 			Errorf(nil, "WriteFile trivial.c failed: %v", err)
 		}
-		cmd := exec.Command(argv[0], "-c", "-no-pie", "trivial.c")
-		cmd.Dir = *flagTmpdir
-		cmd.Env = append([]string{"LC_ALL=C"}, os.Environ()...)
-		out, err := cmd.CombinedOutput()
-		supported := err == nil && !bytes.Contains(out, []byte("unrecognized"))
-		if supported {
-			argv = append(argv, "-no-pie")
+
+		// GCC uses -no-pie, clang uses -nopie.
+		for _, nopie := range []string{"-no-pie", "-nopie"} {
+			cmd := exec.Command(argv[0], nopie, "trivial.c")
+			cmd.Dir = *flagTmpdir
+			cmd.Env = append([]string{"LC_ALL=C"}, os.Environ()...)
+			out, err := cmd.CombinedOutput()
+			// GCC says "unrecognized command line option ‘-no-pie’"
+			// clang says "unknown argument: '-no-pie'"
+			supported := err == nil && !bytes.Contains(out, []byte("unrecognized")) && !bytes.Contains(out, []byte("unknown"))
+			if supported {
+				argv = append(argv, nopie)
+				break
+			}
 		}
 	}
 
@@ -1529,6 +1563,7 @@ func ldshlibsyms(ctxt *Link, shlib string) {
 		Errorf(nil, "cannot open shared library: %s", libpath)
 		return
 	}
+	defer f.Close()
 
 	hash, err := readnote(f, ELF_NOTE_GO_NAME, ELF_NOTE_GOABIHASH_TAG)
 	if err != nil {
@@ -1894,7 +1929,6 @@ const (
 	BSSSym                  = 'B'
 	UndefinedSym            = 'U'
 	TLSSym                  = 't'
-	FileSym                 = 'f'
 	FrameSym                = 'm'
 	ParamSym                = 'p'
 	AutoSym                 = 'a'
@@ -1978,9 +2012,6 @@ func genasmsym(ctxt *Link, put func(*Link, *Symbol, string, SymbolType, int64, *
 				Errorf(s, "should not be bss (size=%d type=%v special=%v)", len(s.P), s.Type, s.Attr.Special())
 			}
 			put(ctxt, s, s.Name, BSSSym, Symaddr(s), s.Gotype)
-
-		case SFILE:
-			put(ctxt, nil, s.Name, FileSym, s.Value, nil)
 
 		case SHOSTOBJ:
 			if Headtype == objabi.Hwindows || Iself {

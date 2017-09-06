@@ -449,11 +449,6 @@ func heapBitsForObject(p, refBase, refOff uintptr) (base uintptr, hbits heapBits
 	return
 }
 
-// prefetch the bits.
-func (h heapBits) prefetch() {
-	prefetchnta(uintptr(unsafe.Pointer((h.bitp))))
-}
-
 // next returns the heapBits describing the next pointer-sized word in memory.
 // That is, if h describes address p, h.next() describes p+ptrSize.
 // Note that next does not modify h. The caller must record the result.
@@ -1047,7 +1042,9 @@ func heapBitsSetType(x, size, dataSize uintptr, typ *_type) {
 					endnb += endnb
 				}
 				// Truncate to a multiple of original ptrmask.
-				endnb = maxBits / nb * nb
+				// Because nb+nb <= maxBits, nb fits in a byte.
+				// Byte division is cheaper than uintptr division.
+				endnb = uintptr(maxBits/byte(nb)) * nb
 				pbits &= 1<<endnb - 1
 				b = pbits
 				nb = endnb

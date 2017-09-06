@@ -211,6 +211,8 @@ search:
 		}
 		if v.Op == OpPhi {
 			// A Phi implies we have reached the top of the block.
+			// The memory phi, if it exists, is always
+			// the first logical store in the block.
 			continue search
 		}
 		if v.Type.IsTuple() && v.Type.FieldType(1).IsMemory() {
@@ -228,6 +230,8 @@ search:
 				const limit = 50
 				for i := 0; i < limit; i++ {
 					if m.Op == OpPhi {
+						// The memory phi, if it exists, is always
+						// the first logical store in the block.
 						break
 					}
 					if m.Block.ID != target.Block.ID {
@@ -299,6 +303,10 @@ func nlz(x int64) int64 {
 // ntz returns the number of trailing zeros.
 func ntz(x int64) int64 {
 	return 64 - nlz(^x&(x-1))
+}
+
+func oneBit(x int64) bool {
+	return nlz(x)+ntz(x) == 63
 }
 
 // nlo returns the number of leading ones.
@@ -637,6 +645,38 @@ func overlap(offset1, size1, offset2, size2 int64) bool {
 	}
 	if offset2 >= offset1 && offset1+size1 > offset2 {
 		return true
+	}
+	return false
+}
+
+// check if value zeroes out upper 32-bit of 64-bit register.
+// depth limits recursion depth. In AMD64.rules 3 is used as limit,
+// because it catches same amount of cases as 4.
+func zeroUpper32Bits(x *Value, depth int) bool {
+	switch x.Op {
+	case OpAMD64MOVLconst, OpAMD64MOVLload, OpAMD64MOVLQZX, OpAMD64MOVLloadidx1,
+		OpAMD64MOVWload, OpAMD64MOVWloadidx1, OpAMD64MOVBload, OpAMD64MOVBloadidx1,
+		OpAMD64MOVLloadidx4, OpAMD64ADDLmem, OpAMD64SUBLmem, OpAMD64ANDLmem,
+		OpAMD64ORLmem, OpAMD64XORLmem, OpAMD64CVTTSD2SL,
+		OpAMD64ADDL, OpAMD64ADDLconst, OpAMD64SUBL, OpAMD64SUBLconst,
+		OpAMD64ANDL, OpAMD64ANDLconst, OpAMD64ORL, OpAMD64ORLconst,
+		OpAMD64XORL, OpAMD64XORLconst, OpAMD64NEGL, OpAMD64NOTL:
+		return true
+	case OpArg, OpSelect0, OpSelect1:
+		return x.Type.Width == 4
+	case OpPhi:
+		// Phis can use each-other as an arguments, instead of tracking visited values,
+		// just limit recursion depth.
+		if depth <= 0 {
+			return false
+		}
+		for i := range x.Args {
+			if !zeroUpper32Bits(x.Args[i], depth-1) {
+				return false
+			}
+		}
+		return true
+
 	}
 	return false
 }

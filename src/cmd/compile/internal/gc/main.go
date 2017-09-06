@@ -18,6 +18,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"path"
@@ -43,6 +44,7 @@ var (
 	Debug_vlog         bool
 	Debug_wb           int
 	Debug_pctab        string
+	Debug_locationlist int
 )
 
 // Debug arguments.
@@ -68,6 +70,7 @@ var debugtab = []struct {
 	{"wb", "print information about write barriers", &Debug_wb},
 	{"export", "print export data", &Debug_export},
 	{"pctab", "print named pc-value table", &Debug_pctab},
+	{"locationlists", "print information about DWARF location list creation", &Debug_locationlist},
 }
 
 const debugHelpHeader = `usage: -d arg[,arg]* and arg is <key>[=<value>]
@@ -103,7 +106,7 @@ func hidePanic() {
 
 func doversion() {
 	p := objabi.Expstring()
-	if p == "X:none" {
+	if p == objabi.DefaultExpstring() {
 		p = ""
 	}
 	sep := ""
@@ -173,6 +176,7 @@ func Main(archInit func(*Arch)) {
 	Nacl = objabi.GOOS == "nacl"
 
 	flag.BoolVar(&compiling_runtime, "+", false, "compiling runtime")
+	flag.BoolVar(&compiling_std, "std", false, "compiling standard library")
 	objabi.Flagcount("%", "debug non-static initializers", &Debug['%'])
 	objabi.Flagcount("B", "disable bounds checking", &Debug['B'])
 	objabi.Flagcount("C", "disable printing of columns in error messages", &Debug['C']) // TODO(gri) remove eventually
@@ -190,11 +194,13 @@ func Main(archInit func(*Arch)) {
 	flag.BoolVar(&pure_go, "complete", false, "compiling complete package (no C or assembly)")
 	flag.StringVar(&debugstr, "d", "", "print debug information about items in `list`; try -d help")
 	flag.BoolVar(&flagDWARF, "dwarf", true, "generate DWARF symbols")
+	flag.BoolVar(&Ctxt.Flag_locationlists, "dwarflocationlists", false, "add location lists to DWARF in optimized mode")
 	objabi.Flagcount("e", "no limit on number of errors reported", &Debug['e'])
 	objabi.Flagcount("f", "debug stack frames", &Debug['f'])
 	objabi.Flagcount("h", "halt on error", &Debug['h'])
 	objabi.Flagcount("i", "debug line number stack", &Debug['i'])
 	objabi.Flagfn1("importmap", "add `definition` of the form source=actual to import map", addImportMap)
+	objabi.Flagfn1("importcfg", "read import configuration from `file`", readImportCfg)
 	flag.StringVar(&flag_installsuffix, "installsuffix", "", "set pkg directory `suffix`")
 	objabi.Flagcount("j", "debug runtime-initialized variables", &Debug['j'])
 	objabi.Flagcount("l", "disable inlining", &Debug['l'])
@@ -295,6 +301,9 @@ func Main(archInit func(*Arch)) {
 	if nBackendWorkers > 1 && !concurrentBackendAllowed() {
 		log.Fatalf("cannot use concurrent backend compilation with provided flags; invoked as %v", os.Args)
 	}
+	if Ctxt.Flag_locationlists && len(Ctxt.Arch.DWARFRegisters) == 0 {
+		log.Fatalf("location lists requested but register mapping not available on %v", Ctxt.Arch.Name)
+	}
 
 	// parse -d argument
 	if debugstr != "" {
@@ -379,6 +388,8 @@ func Main(archInit func(*Arch)) {
 	if Debug['l'] <= 1 {
 		Debug['l'] = 1 - Debug['l']
 	}
+
+	trackScopes = flagDWARF && ((Debug['l'] == 0 && Debug['N'] != 0) || Ctxt.Flag_locationlists)
 
 	Widthptr = thearch.LinkArch.PtrSize
 	Widthreg = thearch.LinkArch.RegSize
@@ -669,7 +680,10 @@ func writebench(filename string) error {
 	return f.Close()
 }
 
-var importMap = map[string]string{}
+var (
+	importMap   = map[string]string{}
+	packageFile map[string]string // nil means not in use
+)
 
 func addImportMap(s string) {
 	if strings.Count(s, "=") != 1 {
@@ -681,6 +695,47 @@ func addImportMap(s string) {
 		log.Fatal("-importmap argument must be of the form source=actual; source and actual must be non-empty")
 	}
 	importMap[source] = actual
+}
+
+func readImportCfg(file string) {
+	packageFile = map[string]string{}
+	data, err := ioutil.ReadFile(file)
+	if err != nil {
+		log.Fatalf("-importcfg: %v", err)
+	}
+
+	for lineNum, line := range strings.Split(string(data), "\n") {
+		lineNum++ // 1-based
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		var verb, args string
+		if i := strings.Index(line, " "); i < 0 {
+			verb = line
+		} else {
+			verb, args = line[:i], strings.TrimSpace(line[i+1:])
+		}
+		var before, after string
+		if i := strings.Index(args, "="); i >= 0 {
+			before, after = args[:i], args[i+1:]
+		}
+		switch verb {
+		default:
+			log.Fatalf("%s:%d: unknown directive %q", file, lineNum, verb)
+		case "importmap":
+			if before == "" || after == "" {
+				log.Fatalf(`%s:%d: invalid importmap: syntax is "importmap old=new"`, file, lineNum)
+			}
+			importMap[before] = after
+		case "packagefile":
+			if before == "" || after == "" {
+				log.Fatalf(`%s:%d: invalid packagefile: syntax is "packagefile path=filename"`, file, lineNum)
+			}
+			packageFile[before] = after
+		}
+	}
 }
 
 func saveerrors() {
@@ -702,21 +757,6 @@ func arsize(b *bufio.Reader, name string) int {
 	return i
 }
 
-func skiptopkgdef(b *bufio.Reader) bool {
-	// archive header
-	p, err := b.ReadString('\n')
-	if err != nil {
-		log.Fatalf("reading input: %v", err)
-	}
-	if p != "!<arch>\n" {
-		return false
-	}
-
-	// package export block should be first
-	sz := arsize(b, "__.PKGDEF")
-	return sz > 0
-}
-
 var idirs []string
 
 func addidir(dir string) {
@@ -729,7 +769,7 @@ func isDriveLetter(b byte) bool {
 	return 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z'
 }
 
-// is this path a local name?  begins with ./ or ../ or /
+// is this path a local name? begins with ./ or ../ or /
 func islocalname(name string) bool {
 	return strings.HasPrefix(name, "/") ||
 		runtime.GOOS == "windows" && len(name) >= 3 && isDriveLetter(name[0]) && name[1] == ':' && name[2] == '/' ||
@@ -741,6 +781,11 @@ func findpkg(name string) (file string, ok bool) {
 	if islocalname(name) {
 		if safemode || nolocalimports {
 			return "", false
+		}
+
+		if packageFile != nil {
+			file, ok = packageFile[name]
+			return file, ok
 		}
 
 		// try .a before .6.  important for building libraries:
@@ -763,6 +808,11 @@ func findpkg(name string) (file string, ok bool) {
 	if q := path.Clean(name); q != name {
 		yyerror("non-canonical import path %q (should be %q)", name, q)
 		return "", false
+	}
+
+	if packageFile != nil {
+		file, ok = packageFile[name]
+		return file, ok
 	}
 
 	for _, dir := range idirs {
@@ -824,7 +874,7 @@ func loadsys() {
 			n.Type = typ
 			declare(n, PFUNC)
 		case varTag:
-			importvar(Runtimepkg, sym, typ)
+			importvar(lineno, Runtimepkg, sym, typ)
 		default:
 			Fatalf("unhandled declaration tag %v", d.tag)
 		}
@@ -847,7 +897,7 @@ func importfile(f *Val) *types.Pkg {
 		return nil
 	}
 
-	if isbadimport(path_) {
+	if isbadimport(path_, false) {
 		return nil
 	}
 
@@ -891,7 +941,7 @@ func importfile(f *Val) *types.Pkg {
 		}
 		path_ = path.Join(prefix, path_)
 
-		if isbadimport(path_) {
+		if isbadimport(path_, true) {
 			return nil
 		}
 	}
@@ -917,21 +967,31 @@ func importfile(f *Val) *types.Pkg {
 	defer impf.Close()
 	imp := bufio.NewReader(impf)
 
-	const pkgSuffix = ".a"
-	if strings.HasSuffix(file, pkgSuffix) {
-		if !skiptopkgdef(imp) {
-			yyerror("import %s: not a package file", file)
-			errorexit()
-		}
-	}
-
 	// check object header
 	p, err := imp.ReadString('\n')
 	if err != nil {
-		log.Fatalf("reading input: %v", err)
+		yyerror("import %s: reading input: %v", file, err)
+		errorexit()
 	}
 	if len(p) > 0 {
 		p = p[:len(p)-1]
+	}
+
+	if p == "!<arch>" { // package archive
+		// package export block should be first
+		sz := arsize(imp, "__.PKGDEF")
+		if sz <= 0 {
+			yyerror("import %s: not a package file", file)
+			errorexit()
+		}
+		p, err = imp.ReadString('\n')
+		if err != nil {
+			yyerror("import %s: reading input: %v", file, err)
+			errorexit()
+		}
+		if len(p) > 0 {
+			p = p[:len(p)-1]
+		}
 	}
 
 	if p != "empty archive" {
@@ -952,7 +1012,8 @@ func importfile(f *Val) *types.Pkg {
 	for {
 		p, err = imp.ReadString('\n')
 		if err != nil {
-			log.Fatalf("reading input: %v", err)
+			yyerror("import %s: reading input: %v", file, err)
+			errorexit()
 		}
 		if p == "\n" {
 			break // header ends with blank line
@@ -967,8 +1028,13 @@ func importfile(f *Val) *types.Pkg {
 	}
 
 	// assume files move (get installed) so don't record the full path
-	// (e.g., for file "/Users/foo/go/pkg/darwin_amd64/math.a" record "math.a")
-	Ctxt.AddImport(file[len(file)-len(path_)-len(pkgSuffix):])
+	if packageFile != nil {
+		// If using a packageFile map, assume path_ can be recorded directly.
+		Ctxt.AddImport(path_)
+	} else {
+		// For file "/Users/foo/go/pkg/darwin_amd64/math.a" record "math.a".
+		Ctxt.AddImport(file[len(file)-len(path_)-len(".a"):])
+	}
 
 	// In the importfile, if we find:
 	// $$\n  (textual format): not supported anymore

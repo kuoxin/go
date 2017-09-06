@@ -47,6 +47,8 @@
 		%X	base 16, upper-case, two characters per byte
 	Pointer:
 		%p	base 16 notation, with leading 0x
+		The %b, %d, %o, %x and %X verbs also work with pointers,
+		formatting the value exactly as if it were an integer.
 
 	The default format for %v is:
 		bool:                    %t
@@ -192,9 +194,9 @@
 	For example,
 		fmt.Sprintf("%[2]d %[1]d\n", 11, 22)
 	will yield "22 11", while
-		fmt.Sprintf("%[3]*.[2]*[1]f", 12.0, 2, 6),
+		fmt.Sprintf("%[3]*.[2]*[1]f", 12.0, 2, 6)
 	equivalent to
-		fmt.Sprintf("%6.2f", 12.0),
+		fmt.Sprintf("%6.2f", 12.0)
 	will yield " 12.00". Because an explicit index affects subsequent verbs,
 	this notation can be used to print the same values multiple times
 	by resetting the index for the first argument to be repeated:

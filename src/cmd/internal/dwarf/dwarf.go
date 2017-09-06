@@ -8,22 +8,102 @@
 package dwarf
 
 import (
+	"errors"
 	"fmt"
 )
 
 // InfoPrefix is the prefix for all the symbols containing DWARF info entries.
 const InfoPrefix = "go.info."
 
+// RangePrefix is the prefix for all the symbols containing DWARF location lists.
+const LocPrefix = "go.loc."
+
+// RangePrefix is the prefix for all the symbols containing DWARF range lists.
+const RangePrefix = "go.range."
+
 // Sym represents a symbol.
 type Sym interface {
+	Len() int64
+}
+
+// A Location represents a variable's location at a particular PC range.
+// It becomes a location list entry in the DWARF.
+type Location struct {
+	StartPC, EndPC int64
+	Pieces         []Piece
+}
+
+// A Piece represents the location of a particular part of a variable.
+// It becomes part of a location list entry (a DW_OP_piece) in the DWARF.
+type Piece struct {
+	Length      int64
+	StackOffset int32
+	RegNum      int16
+	Missing     bool
+	OnStack     bool // if true, RegNum is unset.
 }
 
 // A Var represents a local variable or a function parameter.
 type Var struct {
-	Name   string
-	Abbrev int // Either DW_ABRV_AUTO or DW_ABRV_PARAM
-	Offset int32
-	Type   Sym
+	Name         string
+	Abbrev       int // Either DW_ABRV_AUTO or DW_ABRV_PARAM
+	StackOffset  int32
+	LocationList []Location
+	Scope        int32
+	Type         Sym
+	DeclLine     uint
+}
+
+// A Scope represents a lexical scope. All variables declared within a
+// scope will only be visible to instructions covered by the scope.
+// Lexical scopes are contiguous in source files but can end up being
+// compiled to discontiguous blocks of instructions in the executable.
+// The Ranges field lists all the blocks of instructions that belong
+// in this scope.
+type Scope struct {
+	Parent int32
+	Ranges []Range
+	Vars   []*Var
+}
+
+// A Range represents a half-open interval [Start, End).
+type Range struct {
+	Start, End int64
+}
+
+// UnifyRanges merges the list of ranges of c into the list of ranges of s
+func (s *Scope) UnifyRanges(c *Scope) {
+	out := make([]Range, 0, len(s.Ranges)+len(c.Ranges))
+
+	i, j := 0, 0
+	for {
+		var cur Range
+		if i < len(s.Ranges) && j < len(c.Ranges) {
+			if s.Ranges[i].Start < c.Ranges[j].Start {
+				cur = s.Ranges[i]
+				i++
+			} else {
+				cur = c.Ranges[j]
+				j++
+			}
+		} else if i < len(s.Ranges) {
+			cur = s.Ranges[i]
+			i++
+		} else if j < len(c.Ranges) {
+			cur = c.Ranges[j]
+			j++
+		} else {
+			break
+		}
+
+		if n := len(out); n > 0 && cur.Start <= out[n-1].End {
+			out[n-1].End = cur.End
+		} else {
+			out = append(out, cur)
+		}
+	}
+
+	s.Ranges = out
 }
 
 // A Context specifies how to add data to a Sym.
@@ -147,7 +227,7 @@ const (
 )
 
 // Index into the abbrevs table below.
-// Keep in sync with ispubname() and ispubtype() below.
+// Keep in sync with ispubname() and ispubtype() in ld/dwarf.go.
 // ispubtype considers >= NULLTYPE public
 const (
 	DW_ABRV_NULL = iota
@@ -155,7 +235,11 @@ const (
 	DW_ABRV_FUNCTION
 	DW_ABRV_VARIABLE
 	DW_ABRV_AUTO
+	DW_ABRV_AUTO_LOCLIST
 	DW_ABRV_PARAM
+	DW_ABRV_PARAM_LOCLIST
+	DW_ABRV_LEXICAL_BLOCK_RANGES
+	DW_ABRV_LEXICAL_BLOCK_SIMPLE
 	DW_ABRV_STRUCTFIELD
 	DW_ABRV_FUNCTYPEPARAM
 	DW_ABRV_DOTDOTDOT
@@ -195,7 +279,7 @@ var abbrevs = [DW_NABRV]dwAbbrev{
 			{DW_AT_language, DW_FORM_data1},
 			{DW_AT_low_pc, DW_FORM_addr},
 			{DW_AT_high_pc, DW_FORM_addr},
-			{DW_AT_stmt_list, DW_FORM_data4},
+			{DW_AT_stmt_list, DW_FORM_sec_offset},
 			{DW_AT_comp_dir, DW_FORM_string},
 			{DW_AT_producer, DW_FORM_string},
 		},
@@ -209,6 +293,7 @@ var abbrevs = [DW_NABRV]dwAbbrev{
 			{DW_AT_name, DW_FORM_string},
 			{DW_AT_low_pc, DW_FORM_addr},
 			{DW_AT_high_pc, DW_FORM_addr},
+			{DW_AT_frame_base, DW_FORM_block1},
 			{DW_AT_external, DW_FORM_flag},
 		},
 	},
@@ -231,7 +316,20 @@ var abbrevs = [DW_NABRV]dwAbbrev{
 		DW_CHILDREN_no,
 		[]dwAttrForm{
 			{DW_AT_name, DW_FORM_string},
+			{DW_AT_decl_line, DW_FORM_udata},
 			{DW_AT_location, DW_FORM_block1},
+			{DW_AT_type, DW_FORM_ref_addr},
+		},
+	},
+
+	/* AUTO_LOCLIST */
+	{
+		DW_TAG_variable,
+		DW_CHILDREN_no,
+		[]dwAttrForm{
+			{DW_AT_name, DW_FORM_string},
+			{DW_AT_decl_line, DW_FORM_udata},
+			{DW_AT_location, DW_FORM_sec_offset},
 			{DW_AT_type, DW_FORM_ref_addr},
 		},
 	},
@@ -242,8 +340,40 @@ var abbrevs = [DW_NABRV]dwAbbrev{
 		DW_CHILDREN_no,
 		[]dwAttrForm{
 			{DW_AT_name, DW_FORM_string},
+			{DW_AT_decl_line, DW_FORM_udata},
 			{DW_AT_location, DW_FORM_block1},
 			{DW_AT_type, DW_FORM_ref_addr},
+		},
+	},
+
+	/* PARAM_LOCLIST */
+	{
+		DW_TAG_formal_parameter,
+		DW_CHILDREN_no,
+		[]dwAttrForm{
+			{DW_AT_name, DW_FORM_string},
+			{DW_AT_decl_line, DW_FORM_udata},
+			{DW_AT_location, DW_FORM_sec_offset},
+			{DW_AT_type, DW_FORM_ref_addr},
+		},
+	},
+
+	/* LEXICAL_BLOCK_RANGES */
+	{
+		DW_TAG_lexical_block,
+		DW_CHILDREN_yes,
+		[]dwAttrForm{
+			{DW_AT_ranges, DW_FORM_sec_offset},
+		},
+	},
+
+	/* LEXICAL_BLOCK_SIMPLE */
+	{
+		DW_TAG_lexical_block,
+		DW_CHILDREN_yes,
+		[]dwAttrForm{
+			{DW_AT_low_pc, DW_FORM_addr},
+			{DW_AT_high_pc, DW_FORM_addr},
 		},
 	},
 
@@ -253,7 +383,7 @@ var abbrevs = [DW_NABRV]dwAbbrev{
 		DW_CHILDREN_no,
 		[]dwAttrForm{
 			{DW_AT_name, DW_FORM_string},
-			{DW_AT_data_member_location, DW_FORM_block1},
+			{DW_AT_data_member_location, DW_FORM_udata},
 			{DW_AT_type, DW_FORM_ref_addr},
 			{DW_AT_go_embedded_field, DW_FORM_flag},
 		},
@@ -342,6 +472,7 @@ var abbrevs = [DW_NABRV]dwAbbrev{
 		DW_CHILDREN_yes,
 		[]dwAttrForm{
 			{DW_AT_name, DW_FORM_string},
+			{DW_AT_byte_size, DW_FORM_udata},
 			// {DW_AT_type,	DW_FORM_ref_addr},
 			{DW_AT_go_kind, DW_FORM_data1},
 		},
@@ -525,8 +656,8 @@ func putattr(ctxt Context, s Sym, abbrev int, form int, cls int, value int64, da
 		ctxt.AddInt(s, 2, value)
 
 	case DW_FORM_data4: // constant, {line,loclist,mac,rangelist}ptr
-		if cls == DW_CLS_PTR { // DW_AT_stmt_list
-			ctxt.AddSectionOffset(s, 4, data, 0)
+		if cls == DW_CLS_PTR { // DW_AT_stmt_list and DW_AT_ranges
+			ctxt.AddSectionOffset(s, 4, data, value)
 			break
 		}
 		ctxt.AddInt(s, 4, value)
@@ -555,16 +686,15 @@ func putattr(ctxt Context, s Sym, abbrev int, form int, cls int, value int64, da
 			ctxt.AddInt(s, 1, 0)
 		}
 
-	// In DWARF 2 (which is what we claim to generate),
-	// the ref_addr is the same size as a normal address.
-	// In DWARF 3 it is always 32 bits, unless emitting a large
+	// As of DWARF 3 the ref_addr is always 32 bits, unless emitting a large
 	// (> 4 GB of debug info aka "64-bit") unit, which we don't implement.
 	case DW_FORM_ref_addr: // reference to a DIE in the .info section
+		fallthrough
+	case DW_FORM_sec_offset: // offset into a DWARF section other than .info
 		if data == nil {
 			return fmt.Errorf("dwarf: null reference in %d", abbrev)
-		} else {
-			ctxt.AddSectionOffset(s, ctxt.PtrSize(), data, 0)
 		}
+		ctxt.AddSectionOffset(s, 4, data, value)
 
 	case DW_FORM_ref1, // reference within the compilation unit
 		DW_FORM_ref2,      // reference
@@ -606,45 +736,124 @@ func HasChildren(die *DWDie) bool {
 
 // PutFunc writes a DIE for a function to s.
 // It also writes child DIEs for each variable in vars.
-func PutFunc(ctxt Context, s Sym, name string, external bool, startPC Sym, size int64, vars []*Var) {
-	Uleb128put(ctxt, s, DW_ABRV_FUNCTION)
-	putattr(ctxt, s, DW_ABRV_FUNCTION, DW_FORM_string, DW_CLS_STRING, int64(len(name)), name)
-	putattr(ctxt, s, DW_ABRV_FUNCTION, DW_FORM_addr, DW_CLS_ADDRESS, 0, startPC)
-	putattr(ctxt, s, DW_ABRV_FUNCTION, DW_FORM_addr, DW_CLS_ADDRESS, size+ctxt.SymValue(startPC), startPC)
+func PutFunc(ctxt Context, info, loc, ranges Sym, name string, external bool, startPC Sym, size int64, scopes []Scope) error {
+	Uleb128put(ctxt, info, DW_ABRV_FUNCTION)
+	putattr(ctxt, info, DW_ABRV_FUNCTION, DW_FORM_string, DW_CLS_STRING, int64(len(name)), name)
+	putattr(ctxt, info, DW_ABRV_FUNCTION, DW_FORM_addr, DW_CLS_ADDRESS, 0, startPC)
+	putattr(ctxt, info, DW_ABRV_FUNCTION, DW_FORM_addr, DW_CLS_ADDRESS, size, startPC)
+	putattr(ctxt, info, DW_ABRV_FUNCTION, DW_FORM_block1, DW_CLS_BLOCK, 1, []byte{DW_OP_call_frame_cfa})
 	var ev int64
 	if external {
 		ev = 1
 	}
-	putattr(ctxt, s, DW_ABRV_FUNCTION, DW_FORM_flag, DW_CLS_FLAG, ev, 0)
-	names := make(map[string]bool)
-	var encbuf [20]byte
-	for _, v := range vars {
-		var n string
-		if names[v.Name] {
-			n = fmt.Sprintf("%s#%d", v.Name, len(names))
-		} else {
-			n = v.Name
+	putattr(ctxt, info, DW_ABRV_FUNCTION, DW_FORM_flag, DW_CLS_FLAG, ev, 0)
+	if len(scopes) > 0 {
+		var encbuf [20]byte
+		if putscope(ctxt, info, loc, ranges, startPC, 0, scopes, encbuf[:0]) < int32(len(scopes)) {
+			return errors.New("multiple toplevel scopes")
 		}
-		names[n] = true
+	}
+	Uleb128put(ctxt, info, 0)
+	return nil
+}
 
-		Uleb128put(ctxt, s, int64(v.Abbrev))
-		putattr(ctxt, s, v.Abbrev, DW_FORM_string, DW_CLS_STRING, int64(len(n)), n)
+func putscope(ctxt Context, info, loc, ranges, startPC Sym, curscope int32, scopes []Scope, encbuf []byte) int32 {
+	for _, v := range scopes[curscope].Vars {
+		putvar(ctxt, info, loc, v, startPC, encbuf)
+	}
+	this := curscope
+	curscope++
+	for curscope < int32(len(scopes)) {
+		scope := scopes[curscope]
+		if scope.Parent != this {
+			return curscope
+		}
+
+		if len(scope.Ranges) == 1 {
+			Uleb128put(ctxt, info, DW_ABRV_LEXICAL_BLOCK_SIMPLE)
+			putattr(ctxt, info, DW_ABRV_LEXICAL_BLOCK_SIMPLE, DW_FORM_addr, DW_CLS_ADDRESS, scope.Ranges[0].Start, startPC)
+			putattr(ctxt, info, DW_ABRV_LEXICAL_BLOCK_SIMPLE, DW_FORM_addr, DW_CLS_ADDRESS, scope.Ranges[0].End, startPC)
+		} else {
+			Uleb128put(ctxt, info, DW_ABRV_LEXICAL_BLOCK_RANGES)
+			putattr(ctxt, info, DW_ABRV_LEXICAL_BLOCK_RANGES, DW_FORM_sec_offset, DW_CLS_PTR, ranges.Len(), ranges)
+
+			ctxt.AddAddress(ranges, nil, -1)
+			ctxt.AddAddress(ranges, startPC, 0)
+			for _, r := range scope.Ranges {
+				ctxt.AddAddress(ranges, nil, r.Start)
+				ctxt.AddAddress(ranges, nil, r.End)
+			}
+			ctxt.AddAddress(ranges, nil, 0)
+			ctxt.AddAddress(ranges, nil, 0)
+		}
+
+		curscope = putscope(ctxt, info, loc, ranges, startPC, curscope, scopes, encbuf)
+
+		Uleb128put(ctxt, info, 0)
+	}
+	return curscope
+}
+
+func putvar(ctxt Context, info, loc Sym, v *Var, startPC Sym, encbuf []byte) {
+	n := v.Name
+
+	Uleb128put(ctxt, info, int64(v.Abbrev))
+	putattr(ctxt, info, v.Abbrev, DW_FORM_string, DW_CLS_STRING, int64(len(n)), n)
+	putattr(ctxt, info, v.Abbrev, DW_FORM_udata, DW_CLS_CONSTANT, int64(v.DeclLine), nil)
+	if v.Abbrev == DW_ABRV_AUTO_LOCLIST || v.Abbrev == DW_ABRV_PARAM_LOCLIST {
+		putattr(ctxt, info, v.Abbrev, DW_FORM_sec_offset, DW_CLS_PTR, int64(loc.Len()), loc)
+		addLocList(ctxt, loc, startPC, v, encbuf)
+	} else {
 		loc := append(encbuf[:0], DW_OP_call_frame_cfa)
-		if v.Offset != 0 {
+		if v.StackOffset != 0 {
 			loc = append(loc, DW_OP_consts)
-			loc = AppendSleb128(loc, int64(v.Offset))
+			loc = AppendSleb128(loc, int64(v.StackOffset))
 			loc = append(loc, DW_OP_plus)
 		}
-		putattr(ctxt, s, v.Abbrev, DW_FORM_block1, DW_CLS_BLOCK, int64(len(loc)), loc)
-		putattr(ctxt, s, v.Abbrev, DW_FORM_ref_addr, DW_CLS_REFERENCE, 0, v.Type)
+		putattr(ctxt, info, v.Abbrev, DW_FORM_block1, DW_CLS_BLOCK, int64(len(loc)), loc)
 	}
-	Uleb128put(ctxt, s, 0)
+	putattr(ctxt, info, v.Abbrev, DW_FORM_ref_addr, DW_CLS_REFERENCE, 0, v.Type)
+}
+
+func addLocList(ctxt Context, listSym, startPC Sym, v *Var, encbuf []byte) {
+	// Base address entry: max ptr followed by the base address.
+	ctxt.AddInt(listSym, ctxt.PtrSize(), ^0)
+	ctxt.AddAddress(listSym, startPC, 0)
+	for _, entry := range v.LocationList {
+		ctxt.AddInt(listSym, ctxt.PtrSize(), entry.StartPC)
+		ctxt.AddInt(listSym, ctxt.PtrSize(), entry.EndPC)
+		locBuf := encbuf[:0]
+		for _, piece := range entry.Pieces {
+			if !piece.Missing {
+				if piece.OnStack {
+					locBuf = append(locBuf, DW_OP_fbreg)
+					locBuf = AppendSleb128(locBuf, int64(piece.StackOffset))
+				} else {
+					if piece.RegNum < 32 {
+						locBuf = append(locBuf, DW_OP_reg0+byte(piece.RegNum))
+					} else {
+						locBuf = append(locBuf, DW_OP_regx)
+						locBuf = AppendUleb128(locBuf, uint64(piece.RegNum))
+					}
+				}
+			}
+			if len(entry.Pieces) > 1 {
+				locBuf = append(locBuf, DW_OP_piece)
+				locBuf = AppendUleb128(locBuf, uint64(piece.Length))
+			}
+		}
+		ctxt.AddInt(listSym, 2, int64(len(locBuf)))
+		ctxt.AddBytes(listSym, locBuf)
+	}
+	// End list
+	ctxt.AddInt(listSym, ctxt.PtrSize(), 0)
+	ctxt.AddInt(listSym, ctxt.PtrSize(), 0)
 }
 
 // VarsByOffset attaches the methods of sort.Interface to []*Var,
-// sorting in increasing Offset.
+// sorting in increasing StackOffset.
 type VarsByOffset []*Var
 
 func (s VarsByOffset) Len() int           { return len(s) }
-func (s VarsByOffset) Less(i, j int) bool { return s[i].Offset < s[j].Offset }
+func (s VarsByOffset) Less(i, j int) bool { return s[i].StackOffset < s[j].StackOffset }
 func (s VarsByOffset) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }

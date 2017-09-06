@@ -398,6 +398,50 @@ func BenchmarkReaddir(b *testing.B) {
 	benchmarkReaddir(".", b)
 }
 
+func benchmarkStat(b *testing.B, path string) {
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := Stat(path)
+		if err != nil {
+			b.Fatalf("Stat(%q) failed: %v", path, err)
+		}
+	}
+}
+
+func benchmarkLstat(b *testing.B, path string) {
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := Lstat(path)
+		if err != nil {
+			b.Fatalf("Lstat(%q) failed: %v", path, err)
+		}
+	}
+}
+
+func BenchmarkStatDot(b *testing.B) {
+	benchmarkStat(b, ".")
+}
+
+func BenchmarkStatFile(b *testing.B) {
+	benchmarkStat(b, filepath.Join(runtime.GOROOT(), "src/os/os_test.go"))
+}
+
+func BenchmarkStatDir(b *testing.B) {
+	benchmarkStat(b, filepath.Join(runtime.GOROOT(), "src/os"))
+}
+
+func BenchmarkLstatDot(b *testing.B) {
+	benchmarkLstat(b, ".")
+}
+
+func BenchmarkLstatFile(b *testing.B) {
+	benchmarkLstat(b, filepath.Join(runtime.GOROOT(), "src/os/os_test.go"))
+}
+
+func BenchmarkLstatDir(b *testing.B) {
+	benchmarkLstat(b, filepath.Join(runtime.GOROOT(), "src/os"))
+}
+
 // Read the directory one entry at a time.
 func smallReaddirnames(file *File, length int, t *testing.T) []string {
 	names := make([]string, length)
@@ -886,6 +930,18 @@ func TestRenameFailed(t *testing.T) {
 	}
 }
 
+func TestRenameNotExisting(t *testing.T) {
+	defer chtmpdir(t)()
+	from, to := "doesnt-exist", "dest"
+
+	Mkdir(to, 0777)
+	defer Remove(to)
+
+	if err := Rename(from, to); !IsNotExist(err) {
+		t.Errorf("Rename(%q, %q) = %v; want an IsNotExist error", from, to, err)
+	}
+}
+
 func TestRenameToDirFailed(t *testing.T) {
 	defer chtmpdir(t)()
 	from, to := "renamefrom", "renameto"
@@ -958,9 +1014,14 @@ func TestStartProcess(t *testing.T) {
 		dir = Getenv("SystemRoot")
 		args = []string{"/c", "cd"}
 	default:
-		cmd = "/bin/pwd"
+		var err error
+		cmd, err = osexec.LookPath("pwd")
+		if err != nil {
+			t.Fatalf("Can't find pwd: %v", err)
+		}
 		dir = "/"
 		args = []string{}
+		t.Logf("Testing with %v", cmd)
 	}
 	cmddir, cmdbase := filepath.Split(cmd)
 	args = append([]string{cmdbase}, args...)
@@ -1933,6 +1994,10 @@ func TestLongPath(t *testing.T) {
 					filesize := size(path, t)
 					if dir.Size() != filesize || filesize != wantSize {
 						t.Errorf("Size(%q) is %d, len(ReadFile()) is %d, want %d", path, dir.Size(), filesize, wantSize)
+					}
+					err = Chmod(path, dir.Mode())
+					if err != nil {
+						t.Fatalf("Chmod(%q) failed: %v", path, err)
 					}
 				}
 				if err := Truncate(sizedTempDir+"/bar.txt", 0); err != nil {

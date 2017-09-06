@@ -719,23 +719,6 @@ TEXT runtime·aeshashstr(SB),NOSPLIT,$-4-0
 	MOVW	$0, R0
 	MOVW	(R0), R1
 
-// memhash_varlen(p unsafe.Pointer, h seed) uintptr
-// redirects to memhash(p, h, size) using the size
-// stored in the closure.
-TEXT runtime·memhash_varlen(SB),NOSPLIT,$16-12
-	GO_ARGS
-	NO_LOCAL_POINTERS
-	MOVW	p+0(FP), R0
-	MOVW	h+4(FP), R1
-	MOVW	4(R7), R2
-	MOVW	R0, 4(R13)
-	MOVW	R1, 8(R13)
-	MOVW	R2, 12(R13)
-	BL	runtime·memhash(SB)
-	MOVW	16(R13), R0
-	MOVW	R0, ret+8(FP)
-	RET
-
 // memequal(p, q unsafe.Pointer, size uintptr) bool
 TEXT runtime·memequal(SB),NOSPLIT,$-4-13
 	MOVW	a+0(FP), R1
@@ -830,31 +813,6 @@ samebytes:
 	MOVW	R0, (R7)
 	RET
 
-// eqstring tests whether two strings are equal.
-// The compiler guarantees that strings passed
-// to eqstring have equal length.
-// See runtime_test.go:eqstring_generic for
-// equivalent Go code.
-TEXT runtime·eqstring(SB),NOSPLIT,$-4-17
-	MOVW	s1_base+0(FP), R2
-	MOVW	s2_base+8(FP), R3
-	MOVW	$1, R8
-	MOVB	R8, ret+16(FP)
-	CMP	R2, R3
-	RET.EQ
-	MOVW	s1_len+4(FP), R0
-	ADD	R2, R0, R6
-loop:
-	CMP	R2, R6
-	RET.EQ
-	MOVBU.P	1(R2), R4
-	MOVBU.P	1(R3), R5
-	CMP	R4, R5
-	BEQ	loop
-	MOVW	$0, R8
-	MOVB	R8, ret+16(FP)
-	RET
-
 // TODO: share code with memequal?
 TEXT bytes·Equal(SB),NOSPLIT,$0-25
 	MOVW	a_len+4(FP), R1
@@ -941,6 +899,7 @@ TEXT runtime·procyield(SB),NOSPLIT,$-4
 	MOVW	cycles+0(FP), R1
 	MOVW	$0, R0
 yieldloop:
+	WORD	$0xe320f001	// YIELD (NOP pre-ARMv6K)
 	CMP	R0, R1
 	B.NE	2(PC)
 	RET
@@ -972,18 +931,6 @@ TEXT runtime·goexit(SB),NOSPLIT,$-4-0
 	// traceback from goexit1 must hit code range of goexit
 	MOVW	R0, R0	// NOP
 
-TEXT runtime·prefetcht0(SB),NOSPLIT,$0-4
-	RET
-
-TEXT runtime·prefetcht1(SB),NOSPLIT,$0-4
-	RET
-
-TEXT runtime·prefetcht2(SB),NOSPLIT,$0-4
-	RET
-
-TEXT runtime·prefetchnta(SB),NOSPLIT,$0-4
-	RET
-
 // x -> x/1000000, x%1000000, called from Go with args, results on stack.
 TEXT runtime·usplit(SB),NOSPLIT,$0-12
 	MOVW	x+0(FP), R0
@@ -1010,11 +957,13 @@ TEXT runtime·sigreturn(SB),NOSPLIT,$0-0
 
 #ifndef GOOS_nacl
 // This is called from .init_array and follows the platform, not Go, ABI.
-TEXT runtime·addmoduledata(SB),NOSPLIT,$0-4
+TEXT runtime·addmoduledata(SB),NOSPLIT,$0-8
 	MOVW	R9, saver9-4(SP) // The access to global variables below implicitly uses R9, which is callee-save
+	MOVW	R11, saver11-8(SP) // Likewise, R11 is the temp register, but callee-save in C ABI
 	MOVW	runtime·lastmoduledatap(SB), R1
 	MOVW	R0, moduledata_next(R1)
 	MOVW	R0, runtime·lastmoduledatap(SB)
+	MOVW	saver11-8(SP), R11
 	MOVW	saver9-4(SP), R9
 	RET
 #endif

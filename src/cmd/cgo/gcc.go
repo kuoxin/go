@@ -264,10 +264,6 @@ func (p *Package) guessKinds(f *File) []*Name {
 			if n.IsConst() {
 				continue
 			}
-
-			if isName(n.Define) {
-				n.C = n.Define
-			}
 		}
 
 		// If this is a struct, union, or enum type name, no need to guess the kind.
@@ -296,15 +292,15 @@ func (p *Package) guessKinds(f *File) []*Name {
 	// For each name, we generate these lines, where xxx is the index in toSniff plus one.
 	//
 	//	#line xxx "not-declared"
-	//	void __cgo_f_xxx_1(void) { __typeof__(name) *__cgo_undefined__; }
+	//	void __cgo_f_xxx_1(void) { __typeof__(name) *__cgo_undefined__1; }
 	//	#line xxx "not-type"
-	//	void __cgo_f_xxx_2(void) { name *__cgo_undefined__; }
+	//	void __cgo_f_xxx_2(void) { name *__cgo_undefined__2; }
 	//	#line xxx "not-int-const"
-	//	void __cgo_f_xxx_3(void) { enum { __cgo_undefined__ = (name)*1 }; }
+	//	void __cgo_f_xxx_3(void) { enum { __cgo_undefined__3 = (name)*1 }; }
 	//	#line xxx "not-num-const"
-	//	void __cgo_f_xxx_4(void) { static const double x = (name); }
+	//	void __cgo_f_xxx_4(void) { static const double __cgo_undefined__4 = (name); }
 	//	#line xxx "not-str-lit"
-	//	void __cgo_f_xxx_5(void) { static const char x[] = (name); }
+	//	void __cgo_f_xxx_5(void) { static const char __cgo_undefined__5[] = (name); }
 	//
 	// If we see an error at not-declared:xxx, the corresponding name is not declared.
 	// If we see an error at not-type:xxx, the corresponding name is a type.
@@ -321,20 +317,21 @@ func (p *Package) guessKinds(f *File) []*Name {
 
 	for i, n := range names {
 		fmt.Fprintf(&b, "#line %d \"not-declared\"\n"+
-			"void __cgo_f_%d_1(void) { __typeof__(%s) *__cgo_undefined__; }\n"+
+			"void __cgo_f_%d_1(void) { __typeof__(%s) *__cgo_undefined__1; }\n"+
 			"#line %d \"not-type\"\n"+
-			"void __cgo_f_%d_2(void) { %s *__cgo_undefined__; }\n"+
+			"void __cgo_f_%d_2(void) { %s *__cgo_undefined__2; }\n"+
 			"#line %d \"not-int-const\"\n"+
-			"void __cgo_f_%d_3(void) { enum { __cgo_undefined__ = (%s)*1 }; }\n"+
+			"void __cgo_f_%d_3(void) { enum { __cgo_undefined__3 = (%s)*1 }; }\n"+
 			"#line %d \"not-num-const\"\n"+
-			"void __cgo_f_%d_4(void) { static const double x = (%s); }\n"+
+			"void __cgo_f_%d_4(void) { static const double __cgo_undefined__4 = (%s); }\n"+
 			"#line %d \"not-str-lit\"\n"+
-			"void __cgo_f_%d_5(void) { static const char s[] = (%s); }\n",
+			"void __cgo_f_%d_5(void) { static const char __cgo_undefined__5[] = (%s); }\n",
 			i+1, i+1, n.C,
 			i+1, i+1, n.C,
 			i+1, i+1, n.C,
 			i+1, i+1, n.C,
-			i+1, i+1, n.C)
+			i+1, i+1, n.C,
+		)
 	}
 	fmt.Fprintf(&b, "#line 1 \"completed\"\n"+
 		"int __cgo__1 = __cgo__2;\n")
@@ -353,10 +350,17 @@ func (p *Package) guessKinds(f *File) []*Name {
 		notStrLiteral
 		notDeclared
 	)
+	sawUnmatchedErrors := false
 	for _, line := range strings.Split(stderr, "\n") {
-		if !strings.Contains(line, ": error:") {
-			// we only care about errors.
-			// we tried to turn off warnings on the command line, but one never knows.
+		// Ignore warnings and random comments, with one
+		// exception: newer GCC versions will sometimes emit
+		// an error on a macro #define with a note referring
+		// to where the expansion occurs. We care about where
+		// the expansion occurs, so in that case treat the note
+		// as an error.
+		isError := strings.Contains(line, ": error:")
+		isErrorNote := strings.Contains(line, ": note:") && sawUnmatchedErrors
+		if !isError && !isErrorNote {
 			continue
 		}
 
@@ -374,6 +378,9 @@ func (p *Package) guessKinds(f *File) []*Name {
 		i, _ := strconv.Atoi(line[c1+1 : c2])
 		i--
 		if i < 0 || i >= len(names) {
+			if isError {
+				sawUnmatchedErrors = true
+			}
 			continue
 		}
 
@@ -395,7 +402,14 @@ func (p *Package) guessKinds(f *File) []*Name {
 			sniff[i] |= notNumConst
 		case "not-str-lit":
 			sniff[i] |= notStrLiteral
+		default:
+			if isError {
+				sawUnmatchedErrors = true
+			}
+			continue
 		}
+
+		sawUnmatchedErrors = false
 	}
 
 	if !completed {
@@ -405,7 +419,7 @@ func (p *Package) guessKinds(f *File) []*Name {
 	for i, n := range names {
 		switch sniff[i] {
 		default:
-			error_(token.NoPos, "could not determine kind of name for C.%s", fixGo(n.Go))
+			error_(f.NamePos[n], "could not determine kind of name for C.%s", fixGo(n.Go))
 		case notStrLiteral | notType:
 			n.Kind = "iconst"
 		case notIntConst | notStrLiteral | notType:
@@ -487,18 +501,18 @@ func (p *Package) loadDWARF(f *File, names []*Name) {
 	fmt.Fprintf(&b, "\t1\n")
 	fmt.Fprintf(&b, "};\n")
 
-	d, ints, floats := p.gccDebug(b.Bytes())
+	// do the same work for strings.
+	for i, n := range names {
+		if n.Kind == "sconst" {
+			fmt.Fprintf(&b, "const char __cgodebug_str__%d[] = %s;\n", i, n.C)
+			fmt.Fprintf(&b, "const unsigned long long __cgodebug_strlen__%d = sizeof(%s)-1;\n", i, n.C)
+		}
+	}
+
+	d, ints, floats, strs := p.gccDebug(b.Bytes(), len(names))
 
 	// Scan DWARF info for top-level TagVariable entries with AttrName __cgo__i.
 	types := make([]dwarf.Type, len(names))
-	nameToIndex := make(map[*Name]int)
-	for i, n := range names {
-		nameToIndex[n] = i
-	}
-	nameToRef := make(map[*Name]*Ref)
-	for _, ref := range f.Ref {
-		nameToRef[ref.Name] = ref
-	}
 	r := d.Reader()
 	for {
 		e, err := r.Next()
@@ -549,10 +563,7 @@ func (p *Package) loadDWARF(f *File, names []*Name) {
 		if types[i] == nil {
 			continue
 		}
-		pos := token.NoPos
-		if ref, ok := nameToRef[n]; ok {
-			pos = ref.Pos()
-		}
+		pos := f.NamePos[n]
 		f, fok := types[i].(*dwarf.FuncType)
 		if n.Kind != "type" && fok {
 			n.Kind = "func"
@@ -562,11 +573,19 @@ func (p *Package) loadDWARF(f *File, names []*Name) {
 			switch n.Kind {
 			case "iconst":
 				if i < len(ints) {
-					n.Const = fmt.Sprintf("%#x", ints[i])
+					if _, ok := types[i].(*dwarf.UintType); ok {
+						n.Const = fmt.Sprintf("%#x", uint64(ints[i]))
+					} else {
+						n.Const = fmt.Sprintf("%#x", ints[i])
+					}
 				}
 			case "fconst":
 				if i < len(floats) {
 					n.Const = fmt.Sprintf("%f", floats[i])
+				}
+			case "sconst":
+				if i < len(strs) {
+					n.Const = fmt.Sprintf("%q", strs[i])
 				}
 			}
 		}
@@ -1031,7 +1050,17 @@ func (p *Package) rewriteRef(f *File) {
 	// Assign mangled names.
 	for _, n := range f.Name {
 		if n.Kind == "not-type" {
-			n.Kind = "var"
+			if n.Define == "" {
+				n.Kind = "var"
+			} else {
+				n.Kind = "macro"
+				n.FuncType = &FuncType{
+					Result: n.Type,
+					Go: &ast.FuncType{
+						Results: &ast.FieldList{List: []*ast.Field{{Type: n.Type.Go}}},
+					},
+				}
+			}
 		}
 		if n.Mangle == "" {
 			p.mangleName(n)
@@ -1085,7 +1114,8 @@ func (p *Package) rewriteRef(f *File) {
 				break
 			}
 		case "expr":
-			if r.Name.Kind == "func" {
+			switch r.Name.Kind {
+			case "func":
 				if builtinDefs[r.Name.C] != "" {
 					error_(r.Pos(), "use of builtin '%s' not in function call", fixGo(r.Name.C))
 				}
@@ -1112,24 +1142,24 @@ func (p *Package) rewriteRef(f *File) {
 					Fun:  &ast.Ident{NamePos: (*r.Expr).Pos(), Name: "_Cgo_ptr"},
 					Args: []ast.Expr{ast.NewIdent(name.Mangle)},
 				}
-			} else if r.Name.Kind == "type" {
+			case "type":
 				// Okay - might be new(T)
 				if r.Name.Type == nil {
 					error_(r.Pos(), "expression C.%s: undefined C type '%s'", fixGo(r.Name.Go), r.Name.C)
 					break
 				}
 				expr = r.Name.Type.Go
-			} else if r.Name.Kind == "var" {
+			case "var":
 				expr = &ast.StarExpr{Star: (*r.Expr).Pos(), X: expr}
+			case "macro":
+				expr = &ast.CallExpr{Fun: expr}
 			}
-
 		case "selector":
 			if r.Name.Kind == "var" {
 				expr = &ast.StarExpr{Star: (*r.Expr).Pos(), X: expr}
 			} else {
 				error_(r.Pos(), "only C variables allowed in selector expression %s", fixGo(r.Name.Go))
 			}
-
 		case "type":
 			if r.Name.Kind != "type" {
 				error_(r.Pos(), "expression C.%s used as type", fixGo(r.Name.Go))
@@ -1258,7 +1288,7 @@ func (p *Package) gccCmd() []string {
 
 // gccDebug runs gcc -gdwarf-2 over the C program stdin and
 // returns the corresponding DWARF data and, if present, debug data block.
-func (p *Package) gccDebug(stdin []byte) (d *dwarf.Data, ints []int64, floats []float64) {
+func (p *Package) gccDebug(stdin []byte, nnames int) (d *dwarf.Data, ints []int64, floats []float64, strs []string) {
 	runGcc(stdin, p.gccCmd())
 
 	isDebugInts := func(s string) bool {
@@ -1268,6 +1298,45 @@ func (p *Package) gccDebug(stdin []byte) (d *dwarf.Data, ints []int64, floats []
 	isDebugFloats := func(s string) bool {
 		// Some systems use leading _ to denote non-assembly symbols.
 		return s == "__cgodebug_floats" || s == "___cgodebug_floats"
+	}
+	indexOfDebugStr := func(s string) int {
+		// Some systems use leading _ to denote non-assembly symbols.
+		if strings.HasPrefix(s, "___") {
+			s = s[1:]
+		}
+		if strings.HasPrefix(s, "__cgodebug_str__") {
+			if n, err := strconv.Atoi(s[len("__cgodebug_str__"):]); err == nil {
+				return n
+			}
+		}
+		return -1
+	}
+	indexOfDebugStrlen := func(s string) int {
+		// Some systems use leading _ to denote non-assembly symbols.
+		if strings.HasPrefix(s, "___") {
+			s = s[1:]
+		}
+		if strings.HasPrefix(s, "__cgodebug_strlen__") {
+			if n, err := strconv.Atoi(s[len("__cgodebug_strlen__"):]); err == nil {
+				return n
+			}
+		}
+		return -1
+	}
+
+	strs = make([]string, nnames)
+
+	strdata := make(map[int]string, nnames)
+	strlens := make(map[int]int, nnames)
+
+	buildStrings := func() {
+		for n, strlen := range strlens {
+			data := strdata[n]
+			if len(data) <= strlen {
+				fatalf("invalid string literal")
+			}
+			strs[n] = string(data[:strlen])
+		}
 	}
 
 	if f, err := macho.Open(gccTmp()); err == nil {
@@ -1309,10 +1378,43 @@ func (p *Package) gccDebug(stdin []byte) (d *dwarf.Data, ints []int64, floats []
 							}
 						}
 					}
+				default:
+					if n := indexOfDebugStr(s.Name); n != -1 {
+						// Found it. Now find data section.
+						if i := int(s.Sect) - 1; 0 <= i && i < len(f.Sections) {
+							sect := f.Sections[i]
+							if sect.Addr <= s.Value && s.Value < sect.Addr+sect.Size {
+								if sdat, err := sect.Data(); err == nil {
+									data := sdat[s.Value-sect.Addr:]
+									strdata[n] = string(data)
+								}
+							}
+						}
+						break
+					}
+					if n := indexOfDebugStrlen(s.Name); n != -1 {
+						// Found it. Now find data section.
+						if i := int(s.Sect) - 1; 0 <= i && i < len(f.Sections) {
+							sect := f.Sections[i]
+							if sect.Addr <= s.Value && s.Value < sect.Addr+sect.Size {
+								if sdat, err := sect.Data(); err == nil {
+									data := sdat[s.Value-sect.Addr:]
+									strlen := bo.Uint64(data[:8])
+									if strlen > (1<<(uint(p.IntSize*8)-1) - 1) { // greater than MaxInt?
+										fatalf("string literal too big")
+									}
+									strlens[n] = int(strlen)
+								}
+							}
+						}
+						break
+					}
 				}
 			}
+
+			buildStrings()
 		}
-		return d, ints, floats
+		return d, ints, floats, strs
 	}
 
 	if f, err := elf.Open(gccTmp()); err == nil {
@@ -1355,10 +1457,43 @@ func (p *Package) gccDebug(stdin []byte) (d *dwarf.Data, ints []int64, floats []
 							}
 						}
 					}
+				default:
+					if n := indexOfDebugStr(s.Name); n != -1 {
+						// Found it. Now find data section.
+						if i := int(s.Section); 0 <= i && i < len(f.Sections) {
+							sect := f.Sections[i]
+							if sect.Addr <= s.Value && s.Value < sect.Addr+sect.Size {
+								if sdat, err := sect.Data(); err == nil {
+									data := sdat[s.Value-sect.Addr:]
+									strdata[n] = string(data)
+								}
+							}
+						}
+						break
+					}
+					if n := indexOfDebugStrlen(s.Name); n != -1 {
+						// Found it. Now find data section.
+						if i := int(s.Section); 0 <= i && i < len(f.Sections) {
+							sect := f.Sections[i]
+							if sect.Addr <= s.Value && s.Value < sect.Addr+sect.Size {
+								if sdat, err := sect.Data(); err == nil {
+									data := sdat[s.Value-sect.Addr:]
+									strlen := bo.Uint64(data[:8])
+									if strlen > (1<<(uint(p.IntSize*8)-1) - 1) { // greater than MaxInt?
+										fatalf("string literal too big")
+									}
+									strlens[n] = int(strlen)
+								}
+							}
+						}
+						break
+					}
 				}
 			}
+
+			buildStrings()
 		}
-		return d, ints, floats
+		return d, ints, floats, strs
 	}
 
 	if f, err := pe.Open(gccTmp()); err == nil {
@@ -1396,9 +1531,41 @@ func (p *Package) gccDebug(stdin []byte) (d *dwarf.Data, ints []int64, floats []
 						}
 					}
 				}
+			default:
+				if n := indexOfDebugStr(s.Name); n != -1 {
+					if i := int(s.SectionNumber) - 1; 0 <= i && i < len(f.Sections) {
+						sect := f.Sections[i]
+						if s.Value < sect.Size {
+							if sdat, err := sect.Data(); err == nil {
+								data := sdat[s.Value:]
+								strdata[n] = string(data)
+							}
+						}
+					}
+					break
+				}
+				if n := indexOfDebugStrlen(s.Name); n != -1 {
+					if i := int(s.SectionNumber) - 1; 0 <= i && i < len(f.Sections) {
+						sect := f.Sections[i]
+						if s.Value < sect.Size {
+							if sdat, err := sect.Data(); err == nil {
+								data := sdat[s.Value:]
+								strlen := bo.Uint64(data[:8])
+								if strlen > (1<<(uint(p.IntSize*8)-1) - 1) { // greater than MaxInt?
+									fatalf("string literal too big")
+								}
+								strlens[n] = int(strlen)
+							}
+						}
+					}
+					break
+				}
 			}
 		}
-		return d, ints, floats
+
+		buildStrings()
+
+		return d, ints, floats, strs
 	}
 
 	fatalf("cannot parse gcc output %s as ELF, Mach-O, PE object", gccTmp())
@@ -2089,7 +2256,7 @@ func (c *typeConv) FuncType(dtype *dwarf.FuncType, pos token.Pos) *FuncType {
 	}
 	var r *Type
 	var gr []*ast.Field
-	if _, ok := dtype.ReturnType.(*dwarf.VoidType); ok {
+	if _, ok := base(dtype.ReturnType).(*dwarf.VoidType); ok {
 		gr = []*ast.Field{{Type: c.goVoid}}
 	} else if dtype.ReturnType != nil {
 		r = c.Type(unqual(dtype.ReturnType), pos)

@@ -7,7 +7,6 @@ package gc
 import (
 	"cmd/compile/internal/ssa"
 	"cmd/compile/internal/types"
-	"cmd/internal/bio"
 	"cmd/internal/obj"
 	"cmd/internal/src"
 	"sync"
@@ -84,8 +83,6 @@ var pragcgobuf string
 var outfile string
 var linkobj string
 var dolinkobj bool
-
-var bout *bio.Writer
 
 // nerrors is the number of compiler errors reported
 // since the last call to saveerrors.
@@ -198,6 +195,9 @@ var typecheckok bool
 
 var compiling_runtime bool
 
+// Compiling the standard library
+var compiling_std bool
+
 var compiling_wrappers int
 
 var use_writebarrier bool
@@ -215,6 +215,9 @@ var flagDWARF bool
 // Whether we are adding any sort of code instrumentation, such as
 // when the race detector is enabled.
 var instrumenting bool
+
+// Whether we are tracking lexical scopes for DWARF.
+var trackScopes bool
 
 var debuglive int
 
@@ -287,4 +290,8 @@ var (
 	typedmemmove,
 	typedmemclr,
 	Udiv *obj.LSym
+
+	// GO386=387
+	ControlWord64trunc,
+	ControlWord32 *obj.LSym
 )

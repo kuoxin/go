@@ -279,6 +279,10 @@ func (v *hairyVisitor) visit(n *Node) bool {
 		ORETJMP:
 		v.reason = "unhandled op " + n.Op.String()
 		return true
+
+	case ODCLCONST, OEMPTY, OFALL, OLABEL:
+		// These nodes don't produce code; omit from inlining budget.
+		return false
 	}
 
 	v.budget--
@@ -726,9 +730,9 @@ func mkinlcall1(n *Node, fn *Node, isddd bool) *Node {
 
 	// Zero the return parameters.
 	for _, n := range retvars {
-		as = nod(OAS, n, nil)
-		as = typecheck(as, Etop)
-		ninit.Append(as)
+		ras := nod(OAS, n, nil)
+		ras = typecheck(ras, Etop)
+		ninit.Append(ras)
 	}
 
 	retlabel := autolabel(".i")

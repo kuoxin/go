@@ -448,6 +448,10 @@ func nodbool(b bool) *Node {
 	return c
 }
 
+func nodstr(s string) *Node {
+	return nodlit(Val{s})
+}
+
 // treecopy recursively copies n, with the exception of
 // ONAME, OLITERAL, OTYPE, and non-iota ONONAME leaves.
 // Copies of iota ONONAME nodes are assigned the current
@@ -550,19 +554,6 @@ func methtype(t *types.Type) *types.Type {
 		return t
 	}
 	return nil
-}
-
-func cplxsubtype(et types.EType) types.EType {
-	switch et {
-	case TCOMPLEX64:
-		return TFLOAT32
-
-	case TCOMPLEX128:
-		return TFLOAT64
-	}
-
-	Fatalf("cplxsubtype: %v\n", et)
-	return 0
 }
 
 // eqtype reports whether t1 and t2 are identical, following the spec rules.
@@ -1765,7 +1756,7 @@ func genwrapper(rcvr *types.Type, method *types.Field, newnam *types.Sym, iface 
 		call := nod(OCALL, dot, nil)
 		call.List.Set(args)
 		call.SetIsddd(isddd)
-		if method.Type.Results().NumFields() > 0 {
+		if method.Type.NumResults() > 0 {
 			n := nod(ORETURN, nil, nil)
 			n.List.Set1(call)
 			call = n
@@ -1778,7 +1769,7 @@ func genwrapper(rcvr *types.Type, method *types.Field, newnam *types.Sym, iface 
 		dumplist("genwrapper body", fn.Nbody)
 	}
 
-	funcbody(fn)
+	funcbody()
 	Curfn = fn
 	types.Popdcl()
 	if debug_dclstack != 0 {
@@ -1982,7 +1973,7 @@ var reservedimports = []string{
 	"type",
 }
 
-func isbadimport(path string) bool {
+func isbadimport(path string, allowSpace bool) bool {
 	if strings.Contains(path, "\x00") {
 		yyerror("import path contains NUL")
 		return true
@@ -2011,7 +2002,7 @@ func isbadimport(path string) bool {
 			return true
 		}
 
-		if unicode.IsSpace(r) {
+		if !allowSpace && unicode.IsSpace(r) {
 			yyerror("import path contains space character: %q", path)
 			return true
 		}

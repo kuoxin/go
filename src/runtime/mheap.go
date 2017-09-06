@@ -56,6 +56,12 @@ type mheap struct {
 	// Internal pages map to an arbitrary span.
 	// For pages that have never been allocated, spans entries are nil.
 	//
+	// Modifications are protected by mheap.lock. Reads can be
+	// performed without locking, but ONLY from indexes that are
+	// known to contain in-use or stack spans. This means there
+	// must not be a safe-point between establishing that an
+	// address is live and looking it up in the spans array.
+	//
 	// This is backed by a reserved region of the address space so
 	// it can grow without moving. The memory up to len(spans) is
 	// mapped. cap(spans) indicates the total reserved memory.
@@ -108,12 +114,35 @@ type mheap struct {
 	nsmallfree  [_NumSizeClasses]uint64 // number of frees for small objects (<=maxsmallsize)
 
 	// range of addresses we might see in the heap
-	bitmap         uintptr // Points to one byte past the end of the bitmap
-	bitmap_mapped  uintptr
-	arena_start    uintptr
-	arena_used     uintptr // One byte past usable heap arena. Set with setArenaUsed.
-	arena_end      uintptr
+	bitmap        uintptr // Points to one byte past the end of the bitmap
+	bitmap_mapped uintptr
+
+	// The arena_* fields indicate the addresses of the Go heap.
+	//
+	// The maximum range of the Go heap is
+	// [arena_start, arena_start+_MaxMem+1).
+	//
+	// The range of the current Go heap is
+	// [arena_start, arena_used). Parts of this range may not be
+	// mapped, but the metadata structures are always mapped for
+	// the full range.
+	arena_start uintptr
+	arena_used  uintptr // Set with setArenaUsed.
+
+	// The heap is grown using a linear allocator that allocates
+	// from the block [arena_alloc, arena_end). arena_alloc is
+	// often, but *not always* equal to arena_used.
+	arena_alloc uintptr
+	arena_end   uintptr
+
+	// arena_reserved indicates that the memory [arena_alloc,
+	// arena_end) is reserved (e.g., mapped PROT_NONE). If this is
+	// false, we have to be careful not to clobber existing
+	// mappings here. If this is true, then we own the mapping
+	// here and *must* clobber it to use it.
 	arena_reserved bool
+
+	_ uint32 // ensure 64-bit alignment
 
 	// central free lists for small size classes.
 	// the padding makes sure that the MCentrals are
@@ -480,6 +509,11 @@ func (h *mheap) init(spansStart, spansBytes uintptr) {
 	sp.array = unsafe.Pointer(spansStart)
 	sp.len = 0
 	sp.cap = int(spansBytes / sys.PtrSize)
+
+	// Map metadata structures. But don't map race detector memory
+	// since we're not actually growing the arena here (and TSAN
+	// gets mad if you map 0 bytes).
+	h.setArenaUsed(h.arena_used, false)
 }
 
 // setArenaUsed extends the usable arena to address arena_used and
@@ -834,16 +868,11 @@ func (h *mheap) isLargeSpan(npages uintptr) bool {
 	return npages >= uintptr(len(h.free))
 }
 
-// Allocate a span of exactly npage pages from the treap of large spans.
+// allocLarge allocates a span of at least npage pages from the treap of large spans.
+// Returns nil if no such span currently exists.
 func (h *mheap) allocLarge(npage uintptr) *mspan {
-	return bestFitTreap(&h.freelarge, npage)
-}
-
-// Search treap for smallest span with >= npage pages.
-// If there are multiple smallest spans, select the one
-// with the earliest starting address.
-func bestFitTreap(treap *mTreap, npage uintptr) *mspan {
-	return treap.remove(npage)
+	// Search treap for smallest span with >= npage pages.
+	return h.freelarge.remove(npage)
 }
 
 // Try to add at least npage pages of memory to the heap,
@@ -1100,34 +1129,35 @@ func scavengelist(list *mSpanList, now, limit uint64) uintptr {
 
 	var sumreleased uintptr
 	for s := list.first; s != nil; s = s.next {
-		if (now-uint64(s.unusedsince)) > limit && s.npreleased != s.npages {
-			start := s.base()
-			end := start + s.npages<<_PageShift
-			if physPageSize > _PageSize {
-				// We can only release pages in
-				// physPageSize blocks, so round start
-				// and end in. (Otherwise, madvise
-				// will round them *out* and release
-				// more memory than we want.)
-				start = (start + physPageSize - 1) &^ (physPageSize - 1)
-				end &^= physPageSize - 1
-				if end <= start {
-					// start and end don't span a
-					// whole physical page.
-					continue
-				}
-			}
-			len := end - start
-
-			released := len - (s.npreleased << _PageShift)
-			if physPageSize > _PageSize && released == 0 {
+		if (now-uint64(s.unusedsince)) <= limit || s.npreleased == s.npages {
+			continue
+		}
+		start := s.base()
+		end := start + s.npages<<_PageShift
+		if physPageSize > _PageSize {
+			// We can only release pages in
+			// physPageSize blocks, so round start
+			// and end in. (Otherwise, madvise
+			// will round them *out* and release
+			// more memory than we want.)
+			start = (start + physPageSize - 1) &^ (physPageSize - 1)
+			end &^= physPageSize - 1
+			if end <= start {
+				// start and end don't span a
+				// whole physical page.
 				continue
 			}
-			memstats.heap_released += uint64(released)
-			sumreleased += released
-			s.npreleased = len >> _PageShift
-			sysUnused(unsafe.Pointer(start), len)
 		}
+		len := end - start
+
+		released := len - (s.npreleased << _PageShift)
+		if physPageSize > _PageSize && released == 0 {
+			continue
+		}
+		memstats.heap_released += uint64(released)
+		sumreleased += released
+		s.npreleased = len >> _PageShift
+		sysUnused(unsafe.Pointer(start), len)
 	}
 	return sumreleased
 }

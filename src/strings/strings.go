@@ -257,33 +257,51 @@ func genSplit(s, sep string, sepSave, n int) []string {
 
 // SplitN slices s into substrings separated by sep and returns a slice of
 // the substrings between those separators.
-// If sep is empty, SplitN splits after each UTF-8 sequence.
+//
 // The count determines the number of substrings to return:
 //   n > 0: at most n substrings; the last substring will be the unsplit remainder.
 //   n == 0: the result is nil (zero substrings)
 //   n < 0: all substrings
+//
+// Edge cases for s and sep (for example, empty strings) are handled
+// as described in the documentation for Split.
 func SplitN(s, sep string, n int) []string { return genSplit(s, sep, 0, n) }
 
 // SplitAfterN slices s into substrings after each instance of sep and
 // returns a slice of those substrings.
-// If sep is empty, SplitAfterN splits after each UTF-8 sequence.
+//
 // The count determines the number of substrings to return:
 //   n > 0: at most n substrings; the last substring will be the unsplit remainder.
 //   n == 0: the result is nil (zero substrings)
 //   n < 0: all substrings
+//
+// Edge cases for s and sep (for example, empty strings) are handled
+// as described in the documentation for SplitAfter.
 func SplitAfterN(s, sep string, n int) []string {
 	return genSplit(s, sep, len(sep), n)
 }
 
 // Split slices s into all substrings separated by sep and returns a slice of
 // the substrings between those separators.
-// If sep is empty, Split splits after each UTF-8 sequence.
+//
+// If s does not contain sep and sep is not empty, Split returns a
+// slice of length 1 whose only element is s.
+//
+// If sep is empty, Split splits after each UTF-8 sequence. If both s
+// and sep are empty, Split returns an empty slice.
+//
 // It is equivalent to SplitN with a count of -1.
 func Split(s, sep string) []string { return genSplit(s, sep, 0, -1) }
 
 // SplitAfter slices s into all substrings after each instance of sep and
 // returns a slice of those substrings.
-// If sep is empty, SplitAfter splits after each UTF-8 sequence.
+//
+// If s does not contain sep and sep is not empty, SplitAfter returns
+// a slice of length 1 whose only element is s.
+//
+// If sep is empty, SplitAfter splits after each UTF-8 sequence. If
+// both s and sep are empty, SplitAfter returns an empty slice.
+//
 // It is equivalent to SplitAfterN with a count of -1.
 func SplitAfter(s, sep string) []string {
 	return genSplit(s, sep, len(sep), -1)
@@ -292,8 +310,8 @@ func SplitAfter(s, sep string) []string {
 var asciiSpace = [256]uint8{'\t': 1, '\n': 1, '\v': 1, '\f': 1, '\r': 1, ' ': 1}
 
 // Fields splits the string s around each instance of one or more consecutive white space
-// characters, as defined by unicode.IsSpace, returning an array of substrings of s or an
-// empty list if s contains only white space.
+// characters, as defined by unicode.IsSpace, returning a slice of substrings of s or an
+// empty slice if s contains only white space.
 func Fields(s string) []string {
 	// First count the fields.
 	// This is an exact count if s is ASCII, otherwise it is an approximation.
@@ -340,67 +358,7 @@ func Fields(s string) []string {
 	}
 
 	// Some runes in the input string are not ASCII.
-	// Same general approach as in the ASCII path but
-	// uses DecodeRuneInString and unicode.IsSpace if
-	// a non-ASCII rune needs to be decoded and checked
-	// if it corresponds to a space.
-	a := make([]string, 0, n)
-	fieldStart := 0
-	i := 0
-	// Skip spaces in the front of the input.
-	for i < len(s) {
-		if c := s[i]; c < utf8.RuneSelf {
-			if asciiSpace[c] == 0 {
-				break
-			}
-			i++
-		} else {
-			r, w := utf8.DecodeRuneInString(s[i:])
-			if !unicode.IsSpace(r) {
-				break
-			}
-			i += w
-		}
-	}
-	fieldStart = i
-	for i < len(s) {
-		if c := s[i]; c < utf8.RuneSelf {
-			if asciiSpace[c] == 0 {
-				i++
-				continue
-			}
-			a = append(a, s[fieldStart:i])
-			i++
-		} else {
-			r, w := utf8.DecodeRuneInString(s[i:])
-			if !unicode.IsSpace(r) {
-				i += w
-				continue
-			}
-			a = append(a, s[fieldStart:i])
-			i += w
-		}
-		// Skip spaces in between fields.
-		for i < len(s) {
-			if c := s[i]; c < utf8.RuneSelf {
-				if asciiSpace[c] == 0 {
-					break
-				}
-				i++
-			} else {
-				r, w := utf8.DecodeRuneInString(s[i:])
-				if !unicode.IsSpace(r) {
-					break
-				}
-				i += w
-			}
-		}
-		fieldStart = i
-	}
-	if fieldStart < len(s) { // Last field might end at EOF.
-		a = append(a, s[fieldStart:])
-	}
-	return a
+	return FieldsFunc(s, unicode.IsSpace)
 }
 
 // FieldsFunc splits the string s at each run of Unicode code points c satisfying f(c)
@@ -409,35 +367,42 @@ func Fields(s string) []string {
 // FieldsFunc makes no guarantees about the order in which it calls f(c).
 // If f does not return consistent results for a given c, FieldsFunc may crash.
 func FieldsFunc(s string, f func(rune) bool) []string {
-	// First count the fields.
-	n := 0
-	inField := false
-	for _, rune := range s {
-		wasInField := inField
-		inField = !f(rune)
-		if inField && !wasInField {
-			n++
+	// A span is used to record a slice of s of the form s[start:end].
+	// The start index is inclusive and the end index is exclusive.
+	type span struct {
+		start int
+		end   int
+	}
+	spans := make([]span, 0, 32)
+
+	// Find the field start and end indices.
+	wasField := false
+	fromIndex := 0
+	for i, rune := range s {
+		if f(rune) {
+			if wasField {
+				spans = append(spans, span{start: fromIndex, end: i})
+				wasField = false
+			}
+		} else {
+			if !wasField {
+				fromIndex = i
+				wasField = true
+			}
 		}
 	}
 
-	// Now create them.
-	a := make([]string, n)
-	na := 0
-	fieldStart := -1 // Set to -1 when looking for start of field.
-	for i, rune := range s {
-		if f(rune) {
-			if fieldStart >= 0 {
-				a[na] = s[fieldStart:i]
-				na++
-				fieldStart = -1
-			}
-		} else if fieldStart == -1 {
-			fieldStart = i
-		}
+	// Last field might end at EOF.
+	if wasField {
+		spans = append(spans, span{fromIndex, len(s)})
 	}
-	if fieldStart >= 0 { // Last field might end at EOF.
-		a[na] = s[fieldStart:]
+
+	// Create strings from recorded field indices.
+	a := make([]string, len(spans))
+	for i, span := range spans {
+		a[i] = s[span.start:span.end]
 	}
+
 	return a
 }
 
@@ -698,17 +663,10 @@ func LastIndexFunc(s string, f func(rune) bool) int {
 // truth==false, the sense of the predicate function is
 // inverted.
 func indexFunc(s string, f func(rune) bool, truth bool) int {
-	start := 0
-	for start < len(s) {
-		wid := 1
-		r := rune(s[start])
-		if r >= utf8.RuneSelf {
-			r, wid = utf8.DecodeRuneInString(s[start:])
-		}
+	for i, r := range s {
 		if f(r) == truth {
-			return start
+			return i
 		}
-		start += wid
 	}
 	return -1
 }

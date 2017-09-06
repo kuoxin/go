@@ -75,6 +75,62 @@ type noder struct {
 	linknames  []linkname
 	pragcgobuf string
 	err        chan syntax.Error
+	scope      ScopeID
+}
+
+func (p *noder) funchdr(n *Node) ScopeID {
+	old := p.scope
+	p.scope = 0
+	funchdr(n)
+	return old
+}
+
+func (p *noder) funcbody(old ScopeID) {
+	funcbody()
+	p.scope = old
+}
+
+func (p *noder) openScope(pos src.Pos) {
+	types.Markdcl()
+
+	if trackScopes {
+		Curfn.Func.Parents = append(Curfn.Func.Parents, p.scope)
+		p.scope = ScopeID(len(Curfn.Func.Parents))
+
+		p.markScope(pos)
+	}
+}
+
+func (p *noder) closeScope(pos src.Pos) {
+	types.Popdcl()
+
+	if trackScopes {
+		p.scope = Curfn.Func.Parents[p.scope-1]
+
+		p.markScope(pos)
+	}
+}
+
+func (p *noder) markScope(pos src.Pos) {
+	xpos := Ctxt.PosTable.XPos(pos)
+	if i := len(Curfn.Func.Marks); i > 0 && Curfn.Func.Marks[i-1].Pos == xpos {
+		Curfn.Func.Marks[i-1].Scope = p.scope
+	} else {
+		Curfn.Func.Marks = append(Curfn.Func.Marks, Mark{xpos, p.scope})
+	}
+}
+
+// closeAnotherScope is like closeScope, but it reuses the same mark
+// position as the last closeScope call. This is useful for "for" and
+// "if" statements, as their implicit blocks always end at the same
+// position as an explicit block.
+func (p *noder) closeAnotherScope() {
+	types.Popdcl()
+
+	if trackScopes {
+		p.scope = Curfn.Func.Parents[p.scope-1]
+		Curfn.Func.Marks[len(Curfn.Func.Marks)-1].Scope = p.scope
+	}
 }
 
 // linkname records a //go:linkname directive.
@@ -326,7 +382,7 @@ func (p *noder) funcDecl(fun *syntax.FuncDecl) *Node {
 		declare(f.Func.Nname, PFUNC)
 	}
 
-	funchdr(f)
+	oldScope := p.funchdr(f)
 
 	if fun.Body != nil {
 		if f.Noescape() {
@@ -343,12 +399,11 @@ func (p *noder) funcDecl(fun *syntax.FuncDecl) *Node {
 		f.Func.Endlineno = lineno
 	} else {
 		if pure_go || strings.HasPrefix(f.funcname(), "init.") {
-			yyerrorl(f.Pos, "missing function body for %q", f.funcname())
+			yyerrorl(f.Pos, "missing function body")
 		}
 	}
 
-	funcbody(f)
-
+	p.funcbody(oldScope)
 	return f
 }
 
@@ -439,10 +494,7 @@ func (p *noder) expr(expr syntax.Expr) *Node {
 	case *syntax.KeyValueExpr:
 		return p.nod(expr, OKEY, p.expr(expr.Key), p.wrapname(expr.Value, p.expr(expr.Value)))
 	case *syntax.FuncLit:
-		closurehdr(p.typeExpr(expr.Type))
-		body := p.stmts(expr.Body.List)
-		lineno = Ctxt.PosTable.XPos(expr.Body.Rbrace)
-		return p.setlineno(expr, closurebody(body))
+		return p.funcLit(expr)
 	case *syntax.ParenExpr:
 		return p.nod(expr, OPAREN, p.expr(expr.X), nil)
 	case *syntax.SelectorExpr:
@@ -637,7 +689,11 @@ func (p *noder) embedded(typ syntax.Expr) *Node {
 		}
 		typ = op.X
 	}
-	n := embedded(p.packname(typ), localpkg)
+
+	sym := p.packname(typ)
+	n := nod(ODCLFIELD, newname(lookup(sym.Name)), oldname(sym))
+	n.SetEmbedded(true)
+
 	if isStar {
 		n.Right = p.nod(op, OIND, n.Right, nil)
 	}
@@ -774,14 +830,14 @@ func (p *noder) stmt(stmt syntax.Stmt) *Node {
 }
 
 func (p *noder) blockStmt(stmt *syntax.BlockStmt) []*Node {
-	types.Markdcl()
+	p.openScope(stmt.Pos())
 	nodes := p.stmts(stmt.List)
-	types.Popdcl()
+	p.closeScope(stmt.Rbrace)
 	return nodes
 }
 
 func (p *noder) ifStmt(stmt *syntax.IfStmt) *Node {
-	types.Markdcl()
+	p.openScope(stmt.Pos())
 	n := p.nod(stmt, OIF, nil, nil)
 	if stmt.Init != nil {
 		n.Ninit.Set1(p.stmt(stmt.Init))
@@ -798,12 +854,12 @@ func (p *noder) ifStmt(stmt *syntax.IfStmt) *Node {
 			n.Rlist.Set1(e)
 		}
 	}
-	types.Popdcl()
+	p.closeAnotherScope()
 	return n
 }
 
 func (p *noder) forStmt(stmt *syntax.ForStmt) *Node {
-	types.Markdcl()
+	p.openScope(stmt.Pos())
 	var n *Node
 	if r, ok := stmt.Init.(*syntax.RangeClause); ok {
 		if stmt.Cond != nil || stmt.Post != nil {
@@ -832,12 +888,12 @@ func (p *noder) forStmt(stmt *syntax.ForStmt) *Node {
 		}
 	}
 	n.Nbody.Set(p.blockStmt(stmt.Body))
-	types.Popdcl()
+	p.closeAnotherScope()
 	return n
 }
 
 func (p *noder) switchStmt(stmt *syntax.SwitchStmt) *Node {
-	types.Markdcl()
+	p.openScope(stmt.Pos())
 	n := p.nod(stmt, OSWITCH, nil, nil)
 	if stmt.Init != nil {
 		n.Ninit.Set1(p.stmt(stmt.Init))
@@ -850,18 +906,21 @@ func (p *noder) switchStmt(stmt *syntax.SwitchStmt) *Node {
 	if tswitch != nil && (tswitch.Op != OTYPESW || tswitch.Left == nil) {
 		tswitch = nil
 	}
+	n.List.Set(p.caseClauses(stmt.Body, tswitch, stmt.Rbrace))
 
-	n.List.Set(p.caseClauses(stmt.Body, tswitch))
-
-	types.Popdcl()
+	p.closeScope(stmt.Rbrace)
 	return n
 }
 
-func (p *noder) caseClauses(clauses []*syntax.CaseClause, tswitch *Node) []*Node {
+func (p *noder) caseClauses(clauses []*syntax.CaseClause, tswitch *Node, rbrace src.Pos) []*Node {
 	var nodes []*Node
-	for _, clause := range clauses {
+	for i, clause := range clauses {
 		p.lineno(clause)
-		types.Markdcl()
+		if i > 0 {
+			p.closeScope(clause.Pos())
+		}
+		p.openScope(clause.Pos())
+
 		n := p.nod(clause, OXCASE, nil, nil)
 		if clause.Cases != nil {
 			n.List.Set(p.exprList(clause.Cases))
@@ -875,31 +934,39 @@ func (p *noder) caseClauses(clauses []*syntax.CaseClause, tswitch *Node) []*Node
 		}
 		n.Xoffset = int64(types.Block)
 		n.Nbody.Set(p.stmts(clause.Body))
-		types.Popdcl()
 		nodes = append(nodes, n)
+	}
+	if len(clauses) > 0 {
+		p.closeScope(rbrace)
 	}
 	return nodes
 }
 
 func (p *noder) selectStmt(stmt *syntax.SelectStmt) *Node {
 	n := p.nod(stmt, OSELECT, nil, nil)
-	n.List.Set(p.commClauses(stmt.Body))
+	n.List.Set(p.commClauses(stmt.Body, stmt.Rbrace))
 	return n
 }
 
-func (p *noder) commClauses(clauses []*syntax.CommClause) []*Node {
+func (p *noder) commClauses(clauses []*syntax.CommClause, rbrace src.Pos) []*Node {
 	var nodes []*Node
-	for _, clause := range clauses {
+	for i, clause := range clauses {
 		p.lineno(clause)
-		types.Markdcl()
+		if i > 0 {
+			p.closeScope(clause.Pos())
+		}
+		p.openScope(clause.Pos())
+
 		n := p.nod(clause, OXCASE, nil, nil)
 		if clause.Comm != nil {
 			n.List.Set1(p.stmt(clause.Comm))
 		}
 		n.Xoffset = int64(types.Block)
 		n.Nbody.Set(p.stmts(clause.Body))
-		types.Popdcl()
 		nodes = append(nodes, n)
+	}
+	if len(clauses) > 0 {
+		p.closeScope(rbrace)
 	}
 	return nodes
 }
@@ -1088,6 +1155,18 @@ func (p *noder) error(err error) {
 	p.err <- err.(syntax.Error)
 }
 
+// pragmas that are allowed in the std lib, but don't have
+// a syntax.Pragma value (see lex.go) associated with them.
+var allowedStdPragmas = map[string]bool{
+	"go:cgo_export_static":  true,
+	"go:cgo_export_dynamic": true,
+	"go:cgo_import_static":  true,
+	"go:cgo_import_dynamic": true,
+	"go:cgo_ldflag":         true,
+	"go:cgo_dynamic_linker": true,
+	"go:generate":           true,
+}
+
 // pragma is called concurrently if files are parsed concurrently.
 func (p *noder) pragma(pos src.Pos, text string) syntax.Pragma {
 	switch {
@@ -1115,6 +1194,9 @@ func (p *noder) pragma(pos src.Pos, text string) syntax.Pragma {
 		const runtimePragmas = Systemstack | Nowritebarrier | Nowritebarrierrec | Yeswritebarrierrec
 		if !compiling_runtime && prag&runtimePragmas != 0 {
 			p.error(syntax.Error{Pos: pos, Msg: fmt.Sprintf("//%s only allowed in runtime", verb)})
+		}
+		if prag == 0 && !allowedStdPragmas[verb] && compiling_std {
+			p.error(syntax.Error{Pos: pos, Msg: fmt.Sprintf("//%s is not allowed in the standard library", verb)})
 		}
 		return prag
 	}
