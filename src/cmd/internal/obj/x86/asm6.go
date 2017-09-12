@@ -392,13 +392,13 @@ var ycmpl = []ytab{
 
 var yshb = []ytab{
 	{Yi1, Ynone, Ymb, Zo_m, 2},
-	{Yi32, Ynone, Ymb, Zibo_m, 2},
+	{Yu8, Ynone, Ymb, Zibo_m, 2},
 	{Ycx, Ynone, Ymb, Zo_m, 2},
 }
 
 var yshl = []ytab{
 	{Yi1, Ynone, Yml, Zo_m, 2},
-	{Yi32, Ynone, Yml, Zibo_m, 2},
+	{Yu8, Ynone, Yml, Zibo_m, 2},
 	{Ycl, Ynone, Yml, Zo_m, 2},
 	{Ycx, Ynone, Yml, Zo_m, 2},
 }
@@ -548,6 +548,10 @@ var ypushl = []ytab{
 
 var ypopl = []ytab{
 	{Ynone, Ynone, Yrl, Z_rp, 1},
+	{Ynone, Ynone, Ym, Zo_m, 2},
+}
+
+var yclflush = []ytab{
 	{Ynone, Ynone, Ym, Zo_m, 2},
 }
 
@@ -729,6 +733,11 @@ var ymshufb = []ytab{
 	{Yxm, Ynone, Yxr, Zm2_r, 2},
 }
 
+// It should never have more than 1 entry,
+// because some optab entries you opcode secuences that
+// are longer than 2 bytes (zoffset=2 here),
+// ROUNDPD and ROUNDPS and recently added BLENDPD,
+// to name a few.
 var yxshuf = []ytab{
 	{Yu8, Yxm, Yxr, Zibm_r, 2},
 }
@@ -782,6 +791,10 @@ var ylddqu = []ytab{
 	{Ym, Ynone, Yxr, Zm_r, 1},
 }
 
+var ypalignr = []ytab{
+	{Yu8, Yxm, Yxr, Zibm_r, 2},
+}
+
 // VEX instructions that come in two forms:
 //	VTHING xmm2/m128, xmmV, xmm1
 //	VTHING ymm2/m256, ymmV, ymm1
@@ -804,6 +817,10 @@ var ylddqu = []ytab{
 var yvex_xy3 = []ytab{
 	{Yxm, Yxr, Yxr, Zvex_rm_v_r, 2},
 	{Yym, Yyr, Yyr, Zvex_rm_v_r, 2},
+}
+
+var yvex_x3 = []ytab{
+	{Yxm, Yxr, Yxr, Zvex_rm_v_r, 2},
 }
 
 var yvex_ri3 = []ytab{
@@ -994,6 +1011,7 @@ var optab =
 	{ACDQ, ynone, Px, [23]uint8{0x99}},
 	{ACLC, ynone, Px, [23]uint8{0xf8}},
 	{ACLD, ynone, Px, [23]uint8{0xfc}},
+	{ACLFLUSH, yclflush, Pm, [23]uint8{0xae, 07}},
 	{ACLI, ynone, Px, [23]uint8{0xfa}},
 	{ACLTS, ynone, Pm, [23]uint8{0x06}},
 	{ACMC, ynone, Px, [23]uint8{0xf5}},
@@ -1098,6 +1116,8 @@ var optab =
 	{ADIVSD, yxm, Pf2, [23]uint8{0x5e}},
 	{ADIVSS, yxm, Pf3, [23]uint8{0x5e}},
 	{ADIVW, ydivl, Pe, [23]uint8{0xf7, 06}},
+	{ADPPD, yxshuf, Pq, [23]uint8{0x3a, 0x41, 0}},
+	{ADPPS, yxshuf, Pq, [23]uint8{0x3a, 0x40, 0}},
 	{AEMMS, ynone, Pm, [23]uint8{0x77}},
 	{AENTER, nil, 0, [23]uint8{}}, /* botch */
 	{AFXRSTOR, ysvrs, Pm, [23]uint8{0xae, 01, 0xae, 01}},
@@ -1122,6 +1142,7 @@ var optab =
 	{AINL, yin, Px, [23]uint8{0xe5, 0xed}},
 	{AINSB, ynone, Pb, [23]uint8{0x6c}},
 	{AINSL, ynone, Px, [23]uint8{0x6d}},
+	{AINSERTPS, yxshuf, Pq, [23]uint8{0x3a, 0x21, 0}},
 	{AINSW, ynone, Pe, [23]uint8{0x6d}},
 	{AINT, yint, Px, [23]uint8{0xcd}},
 	{AINTO, ynone, P32, [23]uint8{0xce}},
@@ -1208,6 +1229,7 @@ var optab =
 	{AMOVMSKPD, yxrrl, Pq, [23]uint8{0x50}},
 	{AMOVMSKPS, yxrrl, Pm, [23]uint8{0x50}},
 	{AMOVNTO, yxr_ml, Pe, [23]uint8{0xe7}},
+	{AMOVNTDQA, ylddqu, Pq4, [23]uint8{0x2a}},
 	{AMOVNTPD, yxr_ml, Pe, [23]uint8{0x2b}},
 	{AMOVNTPS, yxr_ml, Pm, [23]uint8{0x2b}},
 	{AMOVNTQ, ymr_ml, Pm, [23]uint8{0xe7}},
@@ -1226,6 +1248,7 @@ var optab =
 	{AMOVWLZX, yml_rl, Pm, [23]uint8{0xb7}},
 	{AMOVWQSX, yml_rl, Pw, [23]uint8{0x0f, 0xbf}},
 	{AMOVWQZX, yml_rl, Pw, [23]uint8{0x0f, 0xb7}},
+	{AMPSADBW, yxshuf, Pq, [23]uint8{0x3a, 0x42, 0}},
 	{AMULB, ydivb, Pb, [23]uint8{0xf6, 04}},
 	{AMULL, ydivl, Px, [23]uint8{0xf7, 04}},
 	{AMULPD, yxm, Pe, [23]uint8{0x59}},
@@ -1255,8 +1278,12 @@ var optab =
 	{AOUTSL, ynone, Px, [23]uint8{0x6f}},
 	{AOUTSW, ynone, Pe, [23]uint8{0x6f}},
 	{AOUTW, yin, Pe, [23]uint8{0xe7, 0xef}},
+	{APABSB, yxm_q4, Pq4, [23]uint8{0x1c}},
+	{APABSD, yxm_q4, Pq4, [23]uint8{0x1e}},
+	{APABSW, yxm_q4, Pq4, [23]uint8{0x1d}},
 	{APACKSSLW, ymm, Py1, [23]uint8{0x6b, Pe, 0x6b}},
 	{APACKSSWB, ymm, Py1, [23]uint8{0x63, Pe, 0x63}},
+	{APACKUSDW, yxm_q4, Pq4, [23]uint8{0x2b}},
 	{APACKUSWB, ymm, Py1, [23]uint8{0x67, Pe, 0x67}},
 	{APADDB, ymm, Py1, [23]uint8{0xfc, Pe, 0xfc}},
 	{APADDL, ymm, Py1, [23]uint8{0xfe, Pe, 0xfe}},
@@ -1266,17 +1293,23 @@ var optab =
 	{APADDUSB, ymm, Py1, [23]uint8{0xdc, Pe, 0xdc}},
 	{APADDUSW, ymm, Py1, [23]uint8{0xdd, Pe, 0xdd}},
 	{APADDW, ymm, Py1, [23]uint8{0xfd, Pe, 0xfd}},
+	{APALIGNR, ypalignr, Pq, [23]uint8{0x3a, 0x0f}},
 	{APAND, ymm, Py1, [23]uint8{0xdb, Pe, 0xdb}},
 	{APANDN, ymm, Py1, [23]uint8{0xdf, Pe, 0xdf}},
 	{APAUSE, ynone, Px, [23]uint8{0xf3, 0x90}},
 	{APAVGB, ymm, Py1, [23]uint8{0xe0, Pe, 0xe0}},
 	{APAVGW, ymm, Py1, [23]uint8{0xe3, Pe, 0xe3}},
+	{APBLENDW, yxshuf, Pq, [23]uint8{0x3a, 0x0e, 0}},
 	{APCMPEQB, ymm, Py1, [23]uint8{0x74, Pe, 0x74}},
 	{APCMPEQL, ymm, Py1, [23]uint8{0x76, Pe, 0x76}},
+	{APCMPEQQ, yxm_q4, Pq4, [23]uint8{0x29}},
 	{APCMPEQW, ymm, Py1, [23]uint8{0x75, Pe, 0x75}},
 	{APCMPGTB, ymm, Py1, [23]uint8{0x64, Pe, 0x64}},
 	{APCMPGTL, ymm, Py1, [23]uint8{0x66, Pe, 0x66}},
+	{APCMPGTQ, yxm_q4, Pq4, [23]uint8{0x37}},
 	{APCMPGTW, ymm, Py1, [23]uint8{0x65, Pe, 0x65}},
+	{APCMPISTRI, yxshuf, Pq, [23]uint8{0x3a, 0x63, 0}},
+	{APCMPISTRM, yxshuf, Pq, [23]uint8{0x3a, 0x62, 0}},
 	{APEXTRW, yextrw, Pq, [23]uint8{0xc5, 00}},
 	{APEXTRB, yextr, Pq, [23]uint8{0x3a, 0x14, 00}},
 	{APEXTRD, yextr, Pq, [23]uint8{0x3a, 0x16, 00}},
@@ -1292,11 +1325,20 @@ var optab =
 	{APINSRB, yinsr, Pq, [23]uint8{0x3a, 0x20, 00}},
 	{APINSRD, yinsr, Pq, [23]uint8{0x3a, 0x22, 00}},
 	{APINSRQ, yinsr, Pq3, [23]uint8{0x3a, 0x22, 00}},
+	{APMADDUBSW, yxm_q4, Pq4, [23]uint8{0x04}},
 	{APMADDWL, ymm, Py1, [23]uint8{0xf5, Pe, 0xf5}},
+	{APMAXSB, yxm_q4, Pq4, [23]uint8{0x3c}},
+	{APMAXSD, yxm_q4, Pq4, [23]uint8{0x3d}},
 	{APMAXSW, yxm, Pe, [23]uint8{0xee}},
 	{APMAXUB, yxm, Pe, [23]uint8{0xde}},
+	{APMAXUD, yxm_q4, Pq4, [23]uint8{0x3f}},
+	{APMAXUW, yxm_q4, Pq4, [23]uint8{0x3e}},
+	{APMINSB, yxm_q4, Pq4, [23]uint8{0x38}},
+	{APMINSD, yxm_q4, Pq4, [23]uint8{0x39}},
 	{APMINSW, yxm, Pe, [23]uint8{0xea}},
 	{APMINUB, yxm, Pe, [23]uint8{0xda}},
+	{APMINUD, yxm_q4, Pq4, [23]uint8{0x3b}},
+	{APMINUW, yxm_q4, Pq4, [23]uint8{0x3a}},
 	{APMOVMSKB, ymskb, Px, [23]uint8{Pe, 0xd7, 0xd7}},
 	{APMOVSXBD, yxm_q4, Pq4, [23]uint8{0x21}},
 	{APMOVSXBQ, yxm_q4, Pq4, [23]uint8{0x22}},
@@ -1311,6 +1353,7 @@ var optab =
 	{APMOVZXWD, yxm_q4, Pq4, [23]uint8{0x33}},
 	{APMOVZXWQ, yxm_q4, Pq4, [23]uint8{0x34}},
 	{APMULDQ, yxm_q4, Pq4, [23]uint8{0x28}},
+	{APMULHRSW, yxm_q4, Pq4, [23]uint8{0x0b}},
 	{APMULHUW, ymm, Py1, [23]uint8{0xe4, Pe, 0xe4}},
 	{APMULHW, ymm, Py1, [23]uint8{0xe5, Pe, 0xe5}},
 	{APMULLD, yxm_q4, Pq4, [23]uint8{0x40}},
@@ -1334,6 +1377,9 @@ var optab =
 	{APSHUFLW, yxshuf, Pf2, [23]uint8{0x70, 00}},
 	{APSHUFW, ymshuf, Pm, [23]uint8{0x70, 00}},
 	{APSHUFB, ymshufb, Pq, [23]uint8{0x38, 0x00}},
+	{APSIGNB, yxm_q4, Pq4, [23]uint8{0x08}},
+	{APSIGND, yxm_q4, Pq4, [23]uint8{0x0a}},
+	{APSIGNW, yxm_q4, Pq4, [23]uint8{0x09}},
 	{APSLLO, ypsdq, Pq, [23]uint8{0x73, 07}},
 	{APSLLL, yps, Py3, [23]uint8{0xf2, 0x72, 06, Pe, 0xf2, Pe, 0x72, 06}},
 	{APSLLQ, yps, Py3, [23]uint8{0xf3, 0x73, 06, Pe, 0xf3, Pe, 0x73, 06}},
@@ -1352,6 +1398,7 @@ var optab =
 	{APSUBUSB, yxm, Pe, [23]uint8{0xd8}},
 	{APSUBUSW, yxm, Pe, [23]uint8{0xd9}},
 	{APSUBW, yxm, Pe, [23]uint8{0xf9}},
+	{APTEST, yxm_q4, Pq4, [23]uint8{0x17}},
 	{APUNPCKHBW, ymm, Py1, [23]uint8{0x68, Pe, 0x68}},
 	{APUNPCKHLQ, ymm, Py1, [23]uint8{0x6a, Pe, 0x6a}},
 	{APUNPCKHQDQ, yxm, Pe, [23]uint8{0x6d}},
@@ -1638,6 +1685,7 @@ var optab =
 	{APSHUFD, yxshuf, Pq, [23]uint8{0x70, 0}},
 	{APCLMULQDQ, yxshuf, Pq, [23]uint8{0x3a, 0x44, 0}},
 	{APCMPESTRI, yxshuf, Pq, [23]uint8{0x3a, 0x61, 0}},
+	{APCMPESTRM, yxshuf, Pq, [23]uint8{0x3a, 0x60, 0}},
 	{AMOVDDUP, yxm, Pf2, [23]uint8{0x12}},
 	{AMOVSHDUP, yxm, Pf3, [23]uint8{0x16}},
 	{AMOVSLDUP, yxm, Pf3, [23]uint8{0x12}},
@@ -1646,6 +1694,8 @@ var optab =
 	{AANDNQ, yvex_r3, Pvex, [23]uint8{VEX_LZ_0F38_W1, 0xF2}},
 	{ABEXTRL, yvex_vmr3, Pvex, [23]uint8{VEX_LZ_0F38_W0, 0xF7}},
 	{ABEXTRQ, yvex_vmr3, Pvex, [23]uint8{VEX_LZ_0F38_W1, 0xF7}},
+	{ABLENDPD, yxshuf, Pq, [23]uint8{0x3a, 0x0d, 0}},
+	{ABLENDPS, yxshuf, Pq, [23]uint8{0x3a, 0x0c, 0}},
 	{ABZHIL, yvex_vmr3, Pvex, [23]uint8{VEX_LZ_0F38_W0, 0xF5}},
 	{ABZHIQ, yvex_vmr3, Pvex, [23]uint8{VEX_LZ_0F38_W1, 0xF5}},
 	{AMULXL, yvex_r3, Pvex, [23]uint8{VEX_LZ_F2_0F38_W0, 0xF6}},
@@ -1676,6 +1726,12 @@ var optab =
 	{AVPOR, yvex_xy3, Pvex, [23]uint8{VEX_128_66_0F_WIG, 0xeb, VEX_256_66_0F_WIG, 0xeb}},
 	{AVPADDQ, yvex_xy3, Pvex, [23]uint8{VEX_128_66_0F_WIG, 0xd4, VEX_256_66_0F_WIG, 0xd4}},
 	{AVPADDD, yvex_xy3, Pvex, [23]uint8{VEX_128_66_0F_WIG, 0xfe, VEX_256_66_0F_WIG, 0xfe}},
+	{AVADDSD, yvex_x3, Pvex, [23]uint8{VEX_128_F2_0F_WIG, 0x58}},
+	{AVSUBSD, yvex_x3, Pvex, [23]uint8{VEX_128_F2_0F_WIG, 0x5c}},
+	{AVFMADD213SD, yvex_x3, Pvex, [23]uint8{VEX_LIG_66_0F38_W1, 0xa9}},
+	{AVFMADD231SD, yvex_x3, Pvex, [23]uint8{VEX_LIG_66_0F38_W1, 0xb9}},
+	{AVFNMADD213SD, yvex_x3, Pvex, [23]uint8{VEX_LIG_66_0F38_W1, 0xad}},
+	{AVFNMADD231SD, yvex_x3, Pvex, [23]uint8{VEX_LIG_66_0F38_W1, 0xbd}},
 	{AVPSLLD, yvex_shift, Pvex, [23]uint8{VEX_128_66_0F_WIG, 0x72, 0xf0, VEX_256_66_0F_WIG, 0x72, 0xf0, VEX_128_66_0F_WIG, 0xf2, VEX_256_66_0F_WIG, 0xf2}},
 	{AVPSLLQ, yvex_shift, Pvex, [23]uint8{VEX_128_66_0F_WIG, 0x73, 0xf0, VEX_256_66_0F_WIG, 0x73, 0xf0, VEX_128_66_0F_WIG, 0xf3, VEX_256_66_0F_WIG, 0xf3}},
 	{AVPSRLD, yvex_shift, Pvex, [23]uint8{VEX_128_66_0F_WIG, 0x72, 0xd0, VEX_256_66_0F_WIG, 0x72, 0xd0, VEX_128_66_0F_WIG, 0xd2, VEX_256_66_0F_WIG, 0xd2}},

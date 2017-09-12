@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"unicode"
 )
@@ -30,7 +31,7 @@ var GOOS, GOARCH, GOROOT string
 var installdir, androiddir string
 var libSuffix, libgoname string
 
-func init() {
+func TestMain(m *testing.M) {
 	GOOS = goEnv("GOOS")
 	GOARCH = goEnv("GOARCH")
 	GOROOT = goEnv("GOROOT")
@@ -53,10 +54,17 @@ func init() {
 	}
 
 	androiddir = fmt.Sprintf("/data/local/tmp/testcshared-%d", os.Getpid())
+	if GOOS == "android" {
+		cmd := exec.Command("adb", "shell", "mkdir", "-p", androiddir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Fatalf("setupAndroid failed: %v\n%s\n", err, out)
+		}
+	}
+
 	libgoname = "libgo." + libSuffix
 
-	ccOut := goEnv("CC")
-	cc = []string{string(ccOut)}
+	cc = []string{goEnv("CC")}
 
 	out := goEnv("GOGCCFLAGS")
 	quote := '\000'
@@ -121,6 +129,15 @@ func init() {
 	if GOOS == "windows" {
 		exeSuffix = ".exe"
 	}
+
+	st := m.Run()
+
+	os.Remove(libgoname)
+	os.RemoveAll("pkg")
+	cleanupHeaders()
+	cleanupAndroid()
+
+	os.Exit(st)
 }
 
 func goEnv(key string) string {
@@ -133,8 +150,8 @@ func goEnv(key string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func cmdToRun(name string) []string {
-	return []string{"./" + name + exeSuffix}
+func cmdToRun(name string) string {
+	return "./" + name + exeSuffix
 }
 
 func adbPush(t *testing.T, filename string) {
@@ -167,11 +184,10 @@ func adbRun(t *testing.T, env []string, adbargs ...string) string {
 	if err != nil {
 		t.Fatalf("adb command failed: %v\n%s\n", err, out)
 	}
-
 	return strings.Replace(string(out), "\r", "", -1)
 }
 
-func runwithenv(t *testing.T, env []string, args ...string) string {
+func run(t *testing.T, env []string, args ...string) string {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
@@ -180,19 +196,6 @@ func runwithenv(t *testing.T, env []string, args ...string) string {
 	} else {
 		t.Logf("run: %v", args)
 	}
-
-	return string(out)
-}
-
-func run(t *testing.T, args ...string) string {
-	cmd := exec.Command(args[0], args[1:]...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("command failed: %v\n%v\n%s\n", args, err, out)
-	} else {
-		t.Logf("run: %v", args)
-	}
-
 	return string(out)
 }
 
@@ -200,42 +203,57 @@ func runExe(t *testing.T, env []string, args ...string) string {
 	if GOOS == "android" {
 		return adbRun(t, env, args...)
 	}
-
-	return runwithenv(t, env, args...)
+	return run(t, env, args...)
 }
 
-func runwithldlibrarypath(t *testing.T, args ...string) string {
-	return runExe(t, append(gopathEnv, "LD_LIBRARY_PATH=."), args...)
+func runCC(t *testing.T, args ...string) string {
+	return run(t, nil, append(cc, args...)...)
 }
 
-func rungocmd(t *testing.T, args ...string) string {
-	return runwithenv(t, gopathEnv, args...)
-}
+func createHeaders() error {
+	args := []string{"go", "install", "-buildmode=c-shared",
+		"-installsuffix", "testcshared", "libgo"}
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Env = gopathEnv
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("command failed: %v\n%v\n%s\n", args, err, out)
+	}
 
-func createHeaders(t *testing.T) {
-	rungocmd(t,
-		"go", "install",
-		"-buildmode=c-shared", "-installsuffix",
-		"testcshared", "libgo",
-	)
+	args = []string{"go", "build", "-buildmode=c-shared",
+		"-installsuffix", "testcshared",
+		"-o", libgoname,
+		filepath.Join("src", "libgo", "libgo.go")}
+	cmd = exec.Command(args[0], args[1:]...)
+	cmd.Env = gopathEnv
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("command failed: %v\n%v\n%s\n", args, err, out)
+	}
 
-	rungocmd(t,
-		"go", "build",
-		"-buildmode=c-shared", "-installsuffix",
-		"testcshared", "-o", libgoname,
-		filepath.Join("src", "libgo", "libgo.go"),
-	)
-	adbPush(t, libgoname)
-
-	if GOOS == "linux" || GOOS == "android" {
-		f, err := elf.Open(libgoname)
+	if GOOS == "android" {
+		args = []string{"adb", "push", libgoname, fmt.Sprintf("%s/%s", androiddir, libgoname)}
+		cmd = exec.Command(args[0], args[1:]...)
+		out, err = cmd.CombinedOutput()
 		if err != nil {
-			t.Fatal("elf.Open failed: ", err)
+			return fmt.Errorf("adb command failed: %v\n%s\n", err, out)
 		}
-		defer f.Close()
-		if hasDynTag(t, f, elf.DT_TEXTREL) {
-			t.Fatalf("%s has DT_TEXTREL flag", libgoname)
-		}
+	}
+
+	return nil
+}
+
+var (
+	headersOnce sync.Once
+	headersErr  error
+)
+
+func createHeadersOnce(t *testing.T) {
+	headersOnce.Do(func() {
+		headersErr = createHeaders()
+	})
+	if headersErr != nil {
+		t.Fatal(headersErr)
 	}
 }
 
@@ -243,37 +261,31 @@ func cleanupHeaders() {
 	os.Remove("libgo.h")
 }
 
-func setupAndroid(t *testing.T) {
+func cleanupAndroid() {
 	if GOOS != "android" {
 		return
 	}
-	adbRun(t, nil, "mkdir", "-p", androiddir)
-}
-
-func cleanupAndroid(t *testing.T) {
-	if GOOS != "android" {
-		return
+	cmd := exec.Command("adb", "shell", "rm", "-rf", androiddir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Fatalf("cleanupAndroid failed: %v\n%s\n", err, out)
 	}
-	adbRun(t, nil, "rm", "-rf", androiddir)
 }
 
 // test0: exported symbols in shared lib are accessible.
 func TestExportedSymbols(t *testing.T) {
-	cmd := "testp"
-	bin := cmdToRun(cmd)
+	t.Parallel()
 
-	setupAndroid(t)
-	defer cleanupAndroid(t)
-	createHeaders(t)
-	defer cleanupHeaders()
+	cmd := "testp0"
 
-	run(t, append(cc, "-I", installdir, "-o", cmd, "main0.c", libgoname)...)
+	createHeadersOnce(t)
+
+	runCC(t, "-I", installdir, "-o", cmd, "main0.c", libgoname)
 	adbPush(t, cmd)
 
-	defer os.Remove(libgoname)
-	defer os.Remove("testp")
+	defer os.Remove(cmd)
 
-	out := runwithldlibrarypath(t, bin...)
+	out := runExe(t, append(gopathEnv, "LD_LIBRARY_PATH=."), cmdToRun(cmd))
 	if strings.TrimSpace(out) != "PASS" {
 		t.Error(out)
 	}
@@ -281,21 +293,18 @@ func TestExportedSymbols(t *testing.T) {
 
 // test1: shared library can be dynamically loaded and exported symbols are accessible.
 func TestExportedSymbolsWithDynamicLoad(t *testing.T) {
-	cmd := "testp"
-	bin := cmdToRun(cmd)
+	t.Parallel()
 
-	setupAndroid(t)
-	defer cleanupAndroid(t)
-	createHeaders(t)
-	defer cleanupHeaders()
+	cmd := "testp1"
 
-	run(t, append(cc, "-o", cmd, "main1.c", "-ldl")...)
+	createHeadersOnce(t)
+
+	runCC(t, "-o", cmd, "main1.c", "-ldl")
 	adbPush(t, cmd)
 
-	defer os.Remove(libgoname)
 	defer os.Remove(cmd)
 
-	out := runExe(t, nil, append(bin, "./"+libgoname)...)
+	out := runExe(t, nil, cmdToRun(cmd), "./"+libgoname)
 	if strings.TrimSpace(out) != "PASS" {
 		t.Error(out)
 	}
@@ -303,14 +312,13 @@ func TestExportedSymbolsWithDynamicLoad(t *testing.T) {
 
 // test2: tests libgo2 which does not export any functions.
 func TestUnexportedSymbols(t *testing.T) {
+	t.Parallel()
+
 	cmd := "testp2"
 	libname := "libgo2." + libSuffix
-	bin := cmdToRun(cmd)
 
-	setupAndroid(t)
-	defer cleanupAndroid(t)
-
-	rungocmd(t,
+	run(t,
+		gopathEnv,
 		"go", "build",
 		"-buildmode=c-shared",
 		"-installsuffix", "testcshared",
@@ -323,17 +331,13 @@ func TestUnexportedSymbols(t *testing.T) {
 		linkFlags = ""
 	}
 
-	run(t, append(
-		cc, "-o", cmd,
-		"main2.c", linkFlags,
-		libname,
-	)...)
+	runCC(t, "-o", cmd, "main2.c", linkFlags, libname)
 	adbPush(t, cmd)
 
 	defer os.Remove(libname)
 	defer os.Remove(cmd)
 
-	out := runwithldlibrarypath(t, bin...)
+	out := runExe(t, append(gopathEnv, "LD_LIBRARY_PATH=."), cmdToRun(cmd))
 
 	if strings.TrimSpace(out) != "PASS" {
 		t.Error(out)
@@ -342,97 +346,66 @@ func TestUnexportedSymbols(t *testing.T) {
 
 // test3: tests main.main is exported on android.
 func TestMainExportedOnAndroid(t *testing.T) {
+	t.Parallel()
+
 	if GOOS != "android" {
 		return
 	}
 
 	cmd := "testp3"
-	bin := cmdToRun(cmd)
 
-	setupAndroid(t)
-	defer cleanupAndroid(t)
-	createHeaders(t)
-	defer cleanupHeaders()
+	createHeadersOnce(t)
 
-	run(t, append(cc, "-o", cmd, "main3.c", "-ldl")...)
+	runCC(t, "-o", cmd, "main3.c", "-ldl")
 	adbPush(t, cmd)
 
-	defer os.Remove(libgoname)
 	defer os.Remove(cmd)
 
-	out := runExe(t, nil, append(bin, "./"+libgoname)...)
+	out := runExe(t, nil, cmdToRun(cmd), "./"+libgoname)
 	if strings.TrimSpace(out) != "PASS" {
 		t.Error(out)
 	}
 }
 
-// test4: test signal handlers
-func TestSignalHandlers(t *testing.T) {
-	cmd := "testp4"
-	libname := "libgo4." + libSuffix
-	bin := cmdToRun(cmd)
-
-	setupAndroid(t)
-	defer cleanupAndroid(t)
-
-	rungocmd(t,
+func testSignalHandlers(t *testing.T, pkgname, cfile, cmd string) {
+	libname := pkgname + "." + libSuffix
+	run(t,
+		gopathEnv,
 		"go", "build",
 		"-buildmode=c-shared",
 		"-installsuffix", "testcshared",
-		"-o", libname, "libgo4",
+		"-o", libname, pkgname,
 	)
 	adbPush(t, libname)
-	run(t, append(
-		cc, "-pthread", "-o", cmd,
-		"main4.c", "-ldl",
-	)...)
+	runCC(t, "-pthread", "-o", cmd, cfile, "-ldl")
 	adbPush(t, cmd)
 
 	defer os.Remove(libname)
 	defer os.Remove(cmd)
-	defer os.Remove("libgo4.h")
+	defer os.Remove(pkgname + ".h")
 
-	out := runExe(t, nil, append(bin, "./"+libname)...)
-
+	bin := cmdToRun(cmd)
+	out := runExe(t, nil, bin, "./"+libname)
 	if strings.TrimSpace(out) != "PASS" {
-		t.Error(run(t, append(bin, libname, "verbose")...))
+		t.Error(run(t, nil, bin, libname, "verbose"))
 	}
+}
+
+// test4: test signal handlers
+func TestSignalHandlers(t *testing.T) {
+	t.Parallel()
+	testSignalHandlers(t, "libgo4", "main4.c", "testp4")
 }
 
 // test5: test signal handlers with os/signal.Notify
 func TestSignalHandlersWithNotify(t *testing.T) {
-	cmd := "testp5"
-	libname := "libgo5." + libSuffix
-	bin := cmdToRun(cmd)
-
-	setupAndroid(t)
-	defer cleanupAndroid(t)
-
-	rungocmd(t,
-		"go", "build",
-		"-buildmode=c-shared",
-		"-installsuffix", "testcshared",
-		"-o", libname, "libgo5",
-	)
-	adbPush(t, libname)
-	run(t, append(
-		cc, "-pthread", "-o", cmd,
-		"main5.c", "-ldl",
-	)...)
-	adbPush(t, cmd)
-
-	defer os.Remove(libname)
-	defer os.Remove(cmd)
-	defer os.Remove("libgo5.h")
-
-	out := runExe(t, nil, append(bin, "./"+libname)...)
-
-	if strings.TrimSpace(out) != "PASS" {
-		t.Error(run(t, append(bin, libname, "verbose")...))
-	}
+	t.Parallel()
+	testSignalHandlers(t, "libgo5", "main5.c", "testp5")
 }
 
 func TestPIE(t *testing.T) {
+	t.Parallel()
+
 	switch GOOS {
 	case "linux", "android":
 		break
@@ -441,47 +414,34 @@ func TestPIE(t *testing.T) {
 		return
 	}
 
-	defer func() {
-		os.RemoveAll("pkg")
-	}()
-
-	createHeaders(t)
-	defer cleanupHeaders()
+	createHeadersOnce(t)
 
 	f, err := elf.Open(libgoname)
 	if err != nil {
-		t.Fatal("elf.Open failed: ", err)
+		t.Fatalf("elf.Open failed: %v", err)
 	}
 	defer f.Close()
-	if hasDynTag(t, f, elf.DT_TEXTREL) {
-		t.Errorf("%s has DT_TEXTREL flag", libgoname)
-	}
-}
 
-func hasDynTag(t *testing.T, f *elf.File, tag elf.DynTag) bool {
 	ds := f.SectionByType(elf.SHT_DYNAMIC)
 	if ds == nil {
-		t.Error("no SHT_DYNAMIC section")
-		return false
+		t.Fatalf("no SHT_DYNAMIC section")
 	}
 	d, err := ds.Data()
 	if err != nil {
-		t.Errorf("can't read SHT_DYNAMIC contents: %v", err)
-		return false
+		t.Fatalf("can't read SHT_DYNAMIC contents: %v", err)
 	}
 	for len(d) > 0 {
-		var t elf.DynTag
+		var tag elf.DynTag
 		switch f.Class {
 		case elf.ELFCLASS32:
-			t = elf.DynTag(f.ByteOrder.Uint32(d[:4]))
+			tag = elf.DynTag(f.ByteOrder.Uint32(d[:4]))
 			d = d[8:]
 		case elf.ELFCLASS64:
-			t = elf.DynTag(f.ByteOrder.Uint64(d[:8]))
+			tag = elf.DynTag(f.ByteOrder.Uint64(d[:8]))
 			d = d[16:]
 		}
-		if t == tag {
-			return true
+		if tag == elf.DT_TEXTREL {
+			t.Fatalf("%s has DT_TEXTREL flag", libgoname)
 		}
 	}
-	return false
 }
